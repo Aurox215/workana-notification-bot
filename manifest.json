@@ -1,0 +1,57 @@
+{
+  "manifest_version": 3,
+  "name": "Workana Proposal Studio",
+  "version": "1.17.0",
+  "description": "Local proposal drafting, project filtering and question submissions on Workana. Bring your own OpenAI key.",
+  "minimum_chrome_version": "120",
+  "permissions": [
+    "storage",
+    "tabs",
+    "alarms",
+    "clipboardWrite",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://www.workana.com/*",
+    "https://workana.com/*",
+    "https://api.openai.com/*",
+    "https://script.google.com/*",
+    "https://script.googleusercontent.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Open Workana Proposal Studio"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.workana.com/*",
+        "https://workana.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "panel.html",
+        "panel.js",
+        "panel.css",
+        "settings-ui.js"
+      ],
+      "matches": [
+        "https://www.workana.com/*",
+        "https://workana.com/*"
+      ]
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; frame-ancestors https://www.workana.com https://workana.com;"
+  }
+}
