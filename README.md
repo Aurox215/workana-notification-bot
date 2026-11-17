@@ -286,3 +286,32 @@ Send authorization tests with deleted/stale portfolio links. Local Chrome checks
 exercise current-filter discovery, physical click-to-stop scrolling, portfolio
 insertion, parallel Sends, worker recovery and existing UI controls. No live bids
 or paid AI calls are used for these checks.
+## Telegram project notifications
+
+Reload the unpacked extension in `chrome://extensions` and refresh Workana.
+In Settings, find **Telegram project notifications**. Create a bot with
+@BotFather, press Start in your bot's Telegram chat, and enter its token and
+your numeric chat ID. For groups, add the bot and use the group's numeric ID.
+Use **Send test notification**, enable notifications, then save.
+
+Optionally paste your Workana `/jobs` search URL with native filters. Otherwise
+the watcher uses the saved Project Search configuration, including named searches.
+Notifications apply the existing project and client eligibility rules. Missing
+details are retried rather than treated as matches. Auto-Bid and an OpenAI API
+key are not required.
+
+The first successful search records existing cards without notifying. Subsequent
+checks notify for new matching cards with the project name, URL, budget and skills,
+plus the client's name, country, star score and paid project count. Missing details
+are labeled "Not shown"; known zero scores and counts remain visible. Checks run about once
+a minute while Chrome runs with your Workana login; suspension can delay them.
+Settings and seen IDs live only in extension storage; no backend or database is
+needed. Telegram credentials are separate from the JSON settings backup. Changing
+the bot, destination or search URL establishes a new baseline.
+
+Failed requests retry after a delay, including Telegram rate limits. Seen IDs
+survive worker restarts. A connection loss after Telegram accepts a message can
+cause a duplicate on retry. Only cards exposed by the search are checked, so
+projects that disappear between checks may be missed. Notifications do not bid.
+
+Verification: `node --test integrations.test.cjs proposal-prompt.test.cjs telegram.test.cjs`.

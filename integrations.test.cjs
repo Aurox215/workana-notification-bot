@@ -6,7 +6,7 @@ const { test } = require('node:test');
 function load() {
   const context = vm.createContext({ structuredClone, AbortSignal, URL, Intl, queueMicrotask() {} });
   vm.runInContext(fs.readFileSync(`${__dirname}/integrations.js`, 'utf8'), context);
-  const source = fs.readFileSync(`${__dirname}/background.js`, 'utf8').replace('import "./integrations.js";', '');
+  const source = fs.readFileSync(`${__dirname}/background.js`, 'utf8').replace('import "./integrations.js";', '').replace('import "./telegram.js";', '');
   vm.runInContext(source.slice(0, source.indexOf('let I=new Ue')) + ';globalThis.background={defaults:O,normalize:de,validate:pe,Store:Ue};})();', context);
   return { ...context.WorkanaIntegrations, ...context.background };
 }
@@ -213,7 +213,7 @@ test('Settings connection button passes its event and reports the receiver respo
   }
   const button = find(tree, node => node.tag === 'button' && node.children[0] === 'Test connection');
   await button.attributes.onclick({ currentTarget: button });
-  const result = find(tree, node => node.attributes.role === 'status');
+  const result = find(tree, node => node.attributes.role === 'status' && node.textContent === 'Connected to Juberu');
   assert.equal(result.textContent, 'Connected to Juberu');
   assert.equal(button.disabled, false);
 });

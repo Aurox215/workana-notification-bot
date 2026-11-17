@@ -1,6 +1,7 @@
 (function () {
   globalThis.createWorkanaSettingsUI = function ({ F, I, L, R, B, V, getState, request, onSaved, onImported, report }) {
     let sheetEdit = null;
+    let telegramEdit = null;
     let includeApiKey = false;
     let working = false;
 
@@ -92,9 +93,33 @@
           report('Settings exported.');
         })), actionButton('Import settings JSON', () => fileInput.click(), { disabled: !!getState().run?.active })),
         F('small', {}, 'Import replaces saved settings. Stop bidding before importing a backup.'), fileInput);
-      return F('div', { class: 'settings-integrations' }, sheetForm, backup);
+      const telegram = telegramEdit ||= structuredClone(getState().telegram?.settings || { enabled: false, botToken: '', chatId: '', searchUrl: '' });
+      const telegramResult = F('p', { role: 'status', 'aria-live': 'polite' });
+      const telegramSave = F('button', { type: 'submit', class: 'primary' }, 'Save Telegram settings');
+      const telegramForm = F('form', { class: 'editor-form', onsubmit: event => {
+        event.preventDefault();
+        void perform(telegramSave, async () => {
+          const state = await request('SAVE_TELEGRAM', { settings: telegram });
+          telegramEdit = null;
+          onSaved(state);
+          report('Telegram settings saved. The first search establishes a baseline; later matching projects trigger notifications.');
+        });
+      } },
+      F('h3', {}, 'Telegram project notifications'),
+      F('p', {}, 'Checks every minute while Chrome is running and you are signed in to Workana. Uses your saved Project Filter and Client Filter / Specific Project settings. Auto-Bid and an OpenAI key are not required.'),
+      B('Enable Telegram notifications', telegram.enabled, value => { telegram.enabled = value; }),
+      L('Bot token from @BotFather', R(telegram.botToken, value => { telegram.botToken = value; }, { type: 'password', autoComplete: 'off' })),
+      L('Telegram chat ID', R(telegram.chatId, value => { telegram.chatId = value; }, { placeholder: '123456789 or -1001234567890' })),
+      L('Workana search URL (optional)', R(telegram.searchUrl, value => { telegram.searchUrl = value; }, { type: 'url', placeholder: 'Paste the Workana /jobs URL with your native filters' })),
+      F('small', {}, 'Create a bot with @BotFather, open your bot in Telegram and press Start, then enter your numeric chat ID. For a group, add the bot and use the group chat ID. Leave the URL blank to use the saved Project Search settings. Changing the bot, chat or URL establishes a new baseline.'),
+      F('p', {}, getState().telegram?.lastError || (getState().telegram?.lastCheckAt ? `Last checked: ${new Date(getState().telegram.lastCheckAt).toLocaleString()}` : 'No search completed yet.')),
+      V(telegramSave, actionButton('Send test notification', event => perform(event.currentTarget, async () => {
+        const reply = await request('TEST_TELEGRAM', { settings: telegram });
+        telegramResult.textContent = reply.message;
+      }))), telegramResult);
+      return F('div', { class: 'settings-integrations' }, telegramForm, sheetForm, backup);
     }
 
-    return { render, refreshStatus, reset() { sheetEdit = null; } };
+    return { render, refreshStatus, reset() { sheetEdit = null; telegramEdit = null; } };
   };
 })();

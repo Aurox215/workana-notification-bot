@@ -4,7 +4,7 @@ const vm = require('node:vm');
 const { test } = require('node:test');
 
 function load(fetch) {
-  const source = fs.readFileSync(`${__dirname}/background.js`, 'utf8').replace('import "./integrations.js";', '');
+  const source = fs.readFileSync(`${__dirname}/background.js`, 'utf8').replace('import "./integrations.js";', '').replace('import "./telegram.js";', '');
   const context = vm.createContext({ structuredClone, AbortSignal, URL, fetch });
   vm.runInContext(fs.readFileSync(`${__dirname}/integrations.js`, 'utf8'), context);
   vm.runInContext(source.slice(0, source.indexOf('let I=new Ue')) +
