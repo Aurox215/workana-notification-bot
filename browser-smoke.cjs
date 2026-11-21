@@ -75,6 +75,142 @@ async function main() {
     assert.ok(content.includes('Import / export all settings'));
     assert.equal(await evaluate('[...document.querySelectorAll("label")].find(label => label.textContent.startsWith("Sheet tab name")).querySelector("input").value'), 'Juberu');
     assert.equal(await evaluate('document.querySelectorAll("form form").length'), 0);
+    // Exercise the real button -> runtime message -> worker -> Telegram response path.
+    // Intercept only the fake test bot; never contact Telegram or use real credentials.
+    async function workerEvaluate(expression) {
+      const connection = new WebSocket(worker.webSocketDebuggerUrl);
+      await new Promise(resolve => connection.addEventListener('open', resolve, { once: true }));
+      try {
+        return await new Promise((resolve, reject) => {
+          connection.addEventListener('message', event => {
+            const message = JSON.parse(event.data);
+            if (message.id !== 77) return;
+            if (message.result?.exceptionDetails || message.error) reject(Error('Worker fixture failed'));
+            else resolve(message.result?.result?.value);
+          });
+          connection.send(JSON.stringify({ id: 77, method: 'Runtime.evaluate', params: { expression, returnByValue: true } }));
+        });
+      } finally { connection.close(); }
+    }
+    await workerEvaluate(`globalThis.telegramFixture = 'success'; globalThis.originalFetch = globalThis.fetch; globalThis.fetch = async (url, options) => {
+      if (!String(url).startsWith('https://api.telegram.org/bot123456:abcdefghijklmnopqrstuvwxyz/')) return originalFetch(url, options);
+      if (telegramFixture === 'empty') return {ok:true,status:200,json:async()=>({ok:true,result:[]})};
+      return {ok:true,status:200,json:async()=>({ok:true,result:[{message:{chat:{id:123456789,type:'private',first_name:'Fixture user'}}}]})};
+    }; true`);
+    async function clickLookup() {
+      await evaluate(`[...document.querySelectorAll('button')].find(b=>b.textContent==='Find my chat ID').click()`);
+      for (let i = 0; i < 100; i++) {
+        if (!await evaluate(`document.querySelector('[data-telegram-lookup-status]').textContent.startsWith('Looking for chats')`)) return;
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      throw Error('Lookup did not finish');
+    }
+    await clickLookup();
+    assert.match(await evaluate(`document.querySelector('[data-telegram-lookup-status]').textContent`), /token from BotFather/);
+    await evaluate(`(()=>{const input=[...document.querySelectorAll('label')].find(l=>l.textContent.startsWith('Bot token from')).querySelector('input');input.value='123456:abcdefghijklmnopqrstuvwxyz';input.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+    await clickLookup();
+    assert.equal(await evaluate(`document.getElementById('telegram-chat-id').value`), '123456789');
+    assert.match(await evaluate(`document.querySelector('[data-telegram-lookup-status]').textContent`), /Chat selected: Fixture user/);
+    assert.equal(await evaluate(`document.querySelector('[data-telegram-lookup-status]').previousElementSibling.textContent`), 'Find my chat ID');
+    assert.equal(await evaluate(`(()=>{const button=[...document.querySelectorAll('button')].find(b=>b.textContent==='Find my chat ID');const input=document.getElementById('telegram-chat-id');const label=document.querySelector('label[for="telegram-chat-id"]');return !!(label.compareDocumentPosition(button)&Node.DOCUMENT_POSITION_FOLLOWING)&&!!(button.compareDocumentPosition(input)&Node.DOCUMENT_POSITION_FOLLOWING)})()`), true);
+    assert.equal(await evaluate(`document.body.innerText.includes('Workana search URL (optional)')`), false);
+    await workerEvaluate(`globalThis.telegramFixture='empty'`);
+    await clickLookup();
+    assert.match(await evaluate(`document.querySelector('[data-telegram-lookup-status]').textContent`), /send it a new message/);
+    await workerEvaluate(`globalThis.fetch=globalThis.originalFetch;true`);
+    await workerEvaluate(`globalThis.telegramTabsCreated=0;globalThis.originalTabsCreate=chrome.tabs.create;chrome.tabs.create=async()=>{telegramTabsCreated++;throw Error('Notification must not create a tab')};true`);
+    assert.equal(await evaluate(`(async()=>{const reply=await chrome.runtime.sendMessage({kind:'SAVE_TELEGRAM',settings:{enabled:true,botToken:'123456:abcdefghijklmnopqrstuvwxyz',chatId:'123456789'}});if(!reply.ok)throw Error(reply.error);return reply.data.telegram.settings.enabled})()`), true);
+    for (let i=0;i<50;i++) {
+      if (await evaluate(`(async()=>!!(await chrome.storage.local.get('telegram')).telegram.lastError)()`)) break;
+      await new Promise(resolve=>setTimeout(resolve,50));
+    }
+    assert.match(await evaluate(`(async()=>(await chrome.storage.local.get('telegram')).telegram.lastError)()`), /search once/);
+    assert.equal(await workerEvaluate('globalThis.telegramTabsCreated'), 0);
+    await evaluate(`chrome.runtime.sendMessage({kind:'SAVE_TELEGRAM',settings:{enabled:false,botToken:'123456:abcdefghijklmnopqrstuvwxyz',chatId:'123456789'}})`);
+    await workerEvaluate(`chrome.tabs.create=globalThis.originalTabsCreate;true`);
+    // Run the real content parser, background watcher and alarm against intercepted
+    // Workana HTML. The fixture never submits a bid or makes a paid/network API call.
+    const listingTarget = await (await fetch(`${base}/json/new?about:blank`, { method: 'PUT' })).json();
+    const listingSocket = new WebSocket(listingTarget.webSocketDebuggerUrl);
+    await new Promise(resolve => listingSocket.addEventListener('open', resolve, { once: true }));
+    let fixtureId = 0, includeNew = false, blockApi = false, apiCalls = 0, includeComplete = false, blockProjects = false;
+    const blockedProjectPaths = [];
+    const fixtureWaiting = new Map();
+    function fixtureSend(method, params = {}) {
+      const id = ++fixtureId;
+      return new Promise((resolve, reject) => { fixtureWaiting.set(id, { resolve, reject }); listingSocket.send(JSON.stringify({ id, method, params })); });
+    }
+    const card = id => `<article data-project-card><h2><a href="https://www.workana.com/job/${id}">${id} React project</a></h2><span data-project-category="it-programming"></span><span data-skill="React">React</span><span class="budget">USD 500 - 1,000</span>${id === 'baseline-project' ? `<time datetime="${new Date(Date.now() - 3600000).toISOString()}"></time>` : '<small>Published: 29 minutes ago Bids: 83</small>'}</article>`;
+    listingSocket.addEventListener('message', event => {
+      const message = JSON.parse(event.data);
+      const pending = fixtureWaiting.get(message.id);
+      if (pending) { fixtureWaiting.delete(message.id); message.error ? pending.reject(Error(message.error.message)) : pending.resolve(message.result); }
+      if (message.method === 'Fetch.requestPaused') {
+        const url = new URL(message.params.request.url);
+        let body = url.pathname.includes('/job/')
+          ? `<html><head><title>Project details</title></head><body><main><h1>${url.pathname.split('/').pop()} React project</h1><span data-project-category="it-programming">IT &amp; Programming</span><time datetime="${new Date(Date.now()-120000).toISOString()}"></time><div data-project-description>Build a React app.</div><span data-skill="React">React</span><span class="budget">USD 500 - 1,000</span></main><aside data-client-profile><span data-client-name="Ana">Ana</span><span data-country="Brazil" data-country-code="BR"></span><span data-rating="4.8"></span><span data-payment-verified="true"></span><p>Projects published: 10</p><p>Projects paid: 8</p><p>Member since: January 2020</p></aside></body></html>`
+          : `<html><head><title>Workana projects</title></head><body><div class="saved-search"><ul class="multi-select-selection-list"><li><span>All</span><button aria-label="Remove All">×</button></li></ul></div><main>${card('baseline-project')}</main><script>fetch('/api/projects/search?category=it-programming&page=1').then(r=>r.json()).catch(()=>{});</script></body></html>`;
+        const isApi = url.pathname === '/api/projects/search';
+        if (isApi) { apiCalls++; const secondPage = url.searchParams.get('page') === '2'; body = blockApi ? '<html><title>Just a moment...</title></html>' : JSON.stringify({ html: secondPage ? includeNew ? card('automatic-new-project') : '<div data-no-results>No projects</div>' : card('baseline-project'), projects: includeComplete && secondPage ? [{ slug: 'complete-api-only', title: 'Complete API project', category_slug: 'it-programming', published_at: new Date(Date.now()-120000).toISOString(), skills: ['React'], budget: 'USD 500', client: { name: 'Ana', country: 'Brazil', rating: 5, paid_projects: 8, published_projects: 10, verified_payment: true } }] : [], links: { next: secondPage ? null : '?category=it-programming&page=2' } }); }
+        if (url.pathname.includes('/job/') && blockProjects) { blockedProjectPaths.push(url.pathname); body = '<html><title>Forbidden</title></html>'; }
+        void fixtureSend('Fetch.fulfillRequest', { requestId: message.params.requestId, responseCode: isApi && blockApi || url.pathname.includes('/job/') && blockProjects ? 403 : 200, responseHeaders: [{ name: 'Content-Type', value: isApi && !blockApi ? 'application/json' : 'text/html;charset=utf-8' }], body: Buffer.from(body).toString('base64') });
+      }
+    });
+    try {
+      await fixtureSend('Fetch.enable', { patterns: [{ urlPattern: '*workana.com/*' }] });
+      await fixtureSend('Page.navigate', { url: 'https://www.workana.com/jobs?category=it-programming' });
+      await workerEvaluate(`globalThis.telegramSent=[];globalThis.fetch=async(url,options)=>{if(String(url).startsWith('https://api.telegram.org/bot123456:abcdefghijklmnopqrstuvwxyz/')){telegramSent.push(JSON.parse(options.body));return{ok:true,status:200,json:async()=>({ok:true})}}return originalFetch(url,options)};true`);
+      await evaluate(`(async()=>{const initial=await chrome.runtime.sendMessage({kind:'BOOTSTRAP'});if(!initial.ok)throw Error(initial.error);const baseConfig=initial.data.config;const config=structuredClone(baseConfig);config.search={...config.search,savedSearchName:'All',useCurrentFilters:false};const reply=await chrome.runtime.sendMessage({kind:'SAVE_CONFIG',config,baseConfig});if(!reply.ok)throw Error(reply.error);})()`);
+      await evaluate(`chrome.runtime.sendMessage({kind:'SAVE_TELEGRAM',settings:{enabled:true,botToken:'123456:abcdefghijklmnopqrstuvwxyz',chatId:'123456789'}})`);
+      for (let i=0;i<100;i++) {
+        if (await evaluate(`(async()=>(await chrome.storage.local.get('telegram')).telegram.baseline)()`)) break;
+        await new Promise(resolve=>setTimeout(resolve,100));
+      }
+      assert.ok(await evaluate(`(async()=>(await chrome.storage.local.get('telegram')).telegram.baseline)()`), 'Real search failed: '+await evaluate(`(async()=>(await chrome.storage.local.get('telegram')).telegram.lastError)()`));
+      assert.equal(await workerEvaluate('telegramSent.length'), 0);
+      await evaluate(`(async()=>{const {telegram}=await chrome.storage.local.get('telegram');await chrome.storage.local.set({telegram:{...telegram,startedAt:Date.now()-35*60000}})})()`);
+      includeNew = true;
+      await workerEvaluate(`chrome.alarms.create('workana-telegram',{when:Date.now()+100});true`);
+      for (let i=0;i<150;i++) {
+        if (await workerEvaluate('telegramSent.length')) break;
+        await new Promise(resolve=>setTimeout(resolve,100));
+      }
+      const automatic = await workerEvaluate('telegramSent');
+      assert.equal(automatic.length, 1, 'New project notification failed: '+await evaluate(`(async()=>JSON.stringify((await chrome.storage.local.get('telegram')).telegram))()`));
+      assert.match(automatic[0].text, /automatic-new-project/);
+      assert.match(automatic[0].text, /Client: Ana/);
+      assert.match(automatic[0].text, /Projects paid: 8/);
+      assert.match(automatic[0].text, /Published: 2 minutes ago/);
+      assert.match(automatic[0].text, /Published at: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC/);
+      assert.match(automatic[0].text, /Search: All/);
+      assert.match(automatic[0].text, /Matched: Project Filter \+ Client Filter/);
+      const check = await evaluate(`(async()=>{const reply=await chrome.runtime.sendMessage({kind:'CHECK_TELEGRAM'});if(!reply.ok)throw Error(reply.error);return reply.data.telegram.summary})()`);
+      assert.match(check, /2 already seen/);
+      assert.equal(await workerEvaluate('telegramSent.length'), 1, 'manual recheck must not duplicate notifications');
+      assert.ok(apiCalls >= 2, 'fresh API requests must run after initial page rendering');
+      const visibleNew = await fixtureSend('Runtime.evaluate', { expression: 'document.body.innerText.includes("automatic-new-project")', returnByValue: true });
+      assert.equal(visibleNew.result.value, false, 'new project must be detected without updating the visible cards');
+      const metadata = await evaluate(`(async()=>{const {telegramSearchBinding}=await chrome.storage.local.get('telegramSearchBinding');return chrome.tabs.sendMessage(telegramSearchBinding.tabId,{channel:'workana-studio',kind:'PARSE_API_SEARCH',payload:{url:telegramSearchBinding.url,text:JSON.stringify({projects:[{slug:'metadata-probe',title:'Metadata probe',published_at:new Date().toISOString(),budget:'USD 500',client:{member_since:'January 2020'}}]})}})})()`);
+      assert.equal(metadata.projects[0].budget.label, 'USD 500');
+      assert.equal(metadata.projects[0].client.registeredAt, '2020-01-01');
+      const humanPublication = await evaluate(`(async()=>{const {telegramSearchBinding}=await chrome.storage.local.get('telegramSearchBinding');return chrome.tabs.sendMessage(telegramSearchBinding.tabId,{channel:'workana-studio',kind:'PARSE_API_PROJECT',payload:{url:'https://www.workana.com/job/human-date-project',text:'<html><title>Human date project</title><body><main><h1>Human date project</h1><p class="project-published">Published on the November 20, 2026 in IT &amp; Programming</p><span data-project-category="it-programming"></span></main></body></html>'}})})()`);
+      assert.equal(humanPublication.publishedAt, Date.parse('2026-11-20T00:00:00Z'));
+      assert.equal(humanPublication.publishedPrecision, 'day');
+      includeComplete = true;
+      blockProjects = true;
+      const proven = await evaluate(`(async()=>{const reply=await chrome.runtime.sendMessage({kind:'CHECK_TELEGRAM'});if(!reply.ok)throw Error(reply.error);return reply.data.telegram})()`);
+      assert.equal(proven.lastError, '');
+      assert.equal(await workerEvaluate('telegramSent.length'), 2, 'complete search data must notify even when project pages would return 403');
+      assert.ok(!blockedProjectPaths.includes('/job/complete-api-only'), 'complete API row fetched unnecessary details: '+blockedProjectPaths.join(', ')+'; '+proven.summary);
+      blockApi = true;
+      await fixtureSend('Runtime.evaluate', { expression: `document.querySelector('main').insertAdjacentHTML('beforeend',${JSON.stringify(card('visible-only-project'))})` });
+      const fallback = await evaluate(`(async()=>{const reply=await chrome.runtime.sendMessage({kind:'CHECK_TELEGRAM'});if(!reply.ok)throw Error(reply.error);return reply.data.telegram})()`);
+      assert.match(fallback.lastError, /search request failed/);
+      assert.equal(await workerEvaluate('telegramSent.length'), 2, 'failed API requests must never fall back to visible cards');
+      assert.equal((await fixtureSend('Runtime.evaluate', { expression: 'document.querySelectorAll(\'iframe[title="Workana notification search"]\').length', returnByValue: true })).result.value, 0, 'temporary render frames must be removed');
+      await evaluate(`chrome.runtime.sendMessage({kind:'SAVE_TELEGRAM',settings:{enabled:false,botToken:'123456:abcdefghijklmnopqrstuvwxyz',chatId:'123456789'}})`);
+      await workerEvaluate(`globalThis.fetch=globalThis.originalFetch;true`);
+    } finally { listingSocket.close(); await fetch(`${base}/json/close/${listingTarget.id}`); }
     await evaluate(`(() => {
       const input = [...document.querySelectorAll('label')].find(label => label.textContent.startsWith('Initial status')).querySelector('input');
       input.value = 'In Contact'; input.dispatchEvent(new Event('input', {bubbles:true}));
@@ -97,8 +233,15 @@ async function main() {
       return { prompt:config.templates[0].proposalPrompt, left:config.window.left, credentialsIncluded:!!backup.credentials };
     })()`);
     assert.deepEqual(result, { prompt: 'Browser smoke proposal prompt', left: 42, credentialsIncluded: false });
+    await evaluate(`[...document.querySelectorAll('button')].find(b=>b.textContent==='Bid Settings').click()`);
+    await evaluate(`[...document.querySelectorAll('button')].find(b=>b.textContent==='Project Filter').click()`);
+    const filterContent = await evaluate('document.body.innerText');
+    assert.ok(filterContent.includes('Exclude skills'));
+    for (const label of ['Project pricing', 'Budget type', 'Minimum project budget', 'Maximum project budget', 'Workana budget ranges']) assert.ok(!filterContent.includes(label), label + ' must be removed');
+    await evaluate(`[...document.querySelectorAll('button')].find(b=>b.textContent==='Client Filter').click()`);
+    assert.ok(await evaluate(`document.body.innerText.includes('Notify for clients who joined more than 2 years ago')`));
     assert.deepEqual(errors, []);
-    console.log('PASS: actual unpacked extension loads; Settings renders; Juberu defaults and saving work; JSON settings round-trip preserves prompt and panel position.');
+    console.log('PASS: session-backed search and detail requests notify new projects absent from the visible page; complete API rows notify without project-page access; exact timestamps and API failures are handled correctly.');
     await send('Browser.close');
   } finally {
     if (socket) socket.close();

@@ -203,7 +203,7 @@ test('Settings connection button passes its event and reports the receiver respo
   const context = vm.createContext({ structuredClone, document: { querySelectorAll: () => [] } });
   vm.runInContext(fs.readFileSync(`${__dirname}/settings-ui.js`, 'utf8'), context);
   const { config } = fixture();
-  const F = (tag, attributes = {}, ...children) => ({ tag, attributes, children: children.flat(Infinity) });
+  const F = (tag, attributes = {}, ...children) => ({ tag, attributes, children: children.flat(Infinity), replaceChildren(...nodes) { this.children = nodes; } });
   const ui = context.createWorkanaSettingsUI({ F, L: (label, input) => F('label', {}, label, input), R: (value, callback, attributes) => F('input', { value, callback, ...attributes }), B: label => F('label', {}, label), V: (...children) => F('div', {}, children), getState: () => ({ config }), request: async kind => { assert.equal(kind, 'TEST_SHEETS'); return { message: 'Connected to Juberu' }; }, report: message => assert.fail(message), onSaved() {} });
   const tree = ui.render();
   function find(node, predicate) {

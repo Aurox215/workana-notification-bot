@@ -286,32 +286,105 @@ Send authorization tests with deleted/stale portfolio links. Local Chrome checks
 exercise current-filter discovery, physical click-to-stop scrolling, portfolio
 insertion, parallel Sends, worker recovery and existing UI controls. No live bids
 or paid AI calls are used for these checks.
+## Current project filtering
+
+Budget filters have been removed from Project Filter. Previously saved or imported
+budget type, currency, minimum, maximum and range restrictions are ignored for
+notifications and automatic bids. Budget details remain visible in project cards
+and Telegram messages. Native filters saved on Workana still control its search results.
+
+Client Filter includes **Notify for clients who joined more than 2 years ago**.
+When enabled, Telegram notifications waive rating and payment-verification checks
+for clients with a known registration date strictly before the date two calendar
+years ago. The option defaults to off. Paid-project ratios, registration-date
+limits and project filters still apply. Missing or invalid registration dates do
+not qualify. This exception does not change Auto-Bid eligibility.
+
 ## Telegram project notifications
 
 Reload the unpacked extension in `chrome://extensions` and refresh Workana.
 In Settings, find **Telegram project notifications**. Create a bot with
 @BotFather, press Start in your bot's Telegram chat, and enter its token and
-your numeric chat ID. For groups, add the bot and use the group's numeric ID.
+click **Find my chat ID** to fill in your numeric ID. If nothing appears, send
+your bot a fresh `hello` message and click again. If multiple chats appear, choose
+your destination. For groups, add the bot and send `/start@YourBotUsername` in
+the group before finding its ID. Manual entry remains available.
 Use **Send test notification**, enable notifications, then save.
 
-Optionally paste your Workana `/jobs` search URL with native filters. Otherwise
-the watcher uses the saved Project Search configuration, including named searches.
+The test button checks Telegram delivery only; it does not enable automatic
+monitoring. The Telegram settings show whether monitoring is off, whether its
+baseline is ready, and the latest scan counts, filter reasons or errors. These
+details update automatically as checks run. Search and detail requests bypass
+the browser cache. A failed detail request leaves that project available for
+retry without blocking notifications for other projects.
+
+Use **Check new projects now** to run an immediate discovery check with the saved
+settings. Its summary distinguishes already-seen projects, older postings, filter
+rejections and missing details. It does not reset the baseline or resend previously
+notified projects. Saved-search chips are matched without their remove icons.
+Expand **Recent project checks** for the title and exact baseline, filter,
+missing-detail or delivery reason for each of the latest 30 checked projects.
+
+After updating to 1.19.2, reload Workana and select the saved search once. Its
+filter URL is retained in extension storage. A page-world observer learns native
+read-only search fetch/XHR requests; credentials and request headers stay in the
+page's memory. The scanner reissues fresh authenticated requests with browser
+caching disabled. A native AJAX GET to the saved `/jobs` URL is used when no
+learned request is available. Responses may contain JSON lists or HTML fragments.
+JSON-wrapped HTML cards and fetch `Request` objects are supported. Polling prefers
+the exact tab that bound the search, so a different Workana tab cannot accidentally
+replace its learned request with an unbound fallback.
+
+Project detail enrichment also uses the signed-in page's request context. Complete
+API rows that already prove every active filter and publication time do not need
+a project-page request. A blocked optional detail request cannot suppress a proven
+match; missing display-only fields remain "Not shown". Required filter evidence
+is never waived: those entries remain retryable with the HTTP error and missing
+fields recorded. Definite rejections and conclusively old projects avoid redundant
+detail requests. Structured budgets and client join dates are parsed with their
+data helpers, independently of similarly named UI functions.
+
+New projects need not appear in the visible page. No hidden frames, temporary
+tabs, visible-card scraping or page refreshes are used for notification discovery.
+Keep a signed-in Workana tab open so requests can use its browser session. The
+status identifies HTTP/API requests as the source. Authentication failures,
+verification pages and unrecognized response schemas stop the check and show an
+error; they never fall back to stale cards. If request learning is unavailable,
+reload Workana once and select the saved search again. Up to three linked result
+pages are checked per pass, with an explicit coverage warning if more remain.
 Notifications apply the existing project and client eligibility rules. Missing
 details are retried rather than treated as matches. Auto-Bid and an OpenAI API
 key are not required.
 
-The first successful search records existing cards without notifying. Subsequent
+The first successful search records pre-existing cards without notifying, while
+still checking projects known to have been published after monitoring was enabled.
+Rejected projects are retried after filter changes or after five minutes. Subsequent
 checks notify for new matching cards with the project name, URL, budget and skills,
 plus the client's name, country, star score and paid project count. Missing details
 are labeled "Not shown"; known zero scores and counts remain visible. Checks run about once
 a minute while Chrome runs with your Workana login; suspension can delay them.
+Messages include **Published at: 2026-11-18 12:03:42 UTC**, a calculated publication
+age, the search name and the qualifying client-filter rule. An exact API timestamp
+takes priority over a relative or date-only project-detail value. The UTC timestamp
+is shown only when the source supplies an epoch or a timestamp with a timezone.
+If Workana exposes only a relative age or calendar date, the message explicitly
+says the exact time is unavailable instead of inventing it. Unknown publication times are
+retried; they do not generate a notification claiming a new posting.
+Workana's human-readable publication dates in English, Spanish and Portuguese are
+recognized as calendar dates. A date overlapping the monitoring start day cannot
+prove a new posting by itself and waits for more precise evidence.
 Settings and seen IDs live only in extension storage; no backend or database is
 needed. Telegram credentials are separate from the JSON settings backup. Changing
-the bot, destination or search URL establishes a new baseline.
+the bot or destination establishes a new baseline.
 
 Failed requests retry after a delay, including Telegram rate limits. Seen IDs
 survive worker restarts. A connection loss after Telegram accepts a message can
-cause a duplicate on retry. Only cards exposed by the search are checked, so
+cause a duplicate on retry. Only results returned by the search are checked, so
 projects that disappear between checks may be missed. Notifications do not bid.
 
-Verification: `node --test integrations.test.cjs proposal-prompt.test.cjs telegram.test.cjs`.
+Verification: `node verify-notifications.cjs` runs the unit and isolated browser
+checks, including a new project that exists only on page two of the API response
+while the visible page remains unchanged. No live Telegram messages, bids or paid
+AI calls are made by verification. Live authenticated Workana API behavior still
+requires verification in the user's session; a mocked endpoint is not proof that
+Workana will accept every session request.
