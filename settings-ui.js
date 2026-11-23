@@ -26,7 +26,13 @@
     function telegramStatus() {
       const state = getState().telegram || {};
       if (!state.settings?.enabled) return 'Automatic notifications are OFF. Enable Telegram notifications and save settings. Sending a test alone does not start monitoring.';
-      return `${state.lastError ? `Check failed: ${state.lastError} ` : ''}${state.discoveryWarning ? `Search warning: ${state.discoveryWarning} ` : ''}${state.discoverySource ? `Source: ${state.discoverySource}. ` : ''}${state.summary || 'Waiting for the first search check.'}${state.lastCheckAt ? ` Last completed check: ${new Date(state.lastCheckAt).toLocaleString()}.` : ''}`;
+      const summary = state.summary || 'Waiting for the first search check.';
+      const status = state.lastError
+        ? `Check failed: ${state.lastError}${summary === 'Project check interrupted.' ? '' : ' ' + summary}`
+        : summary;
+      const warning = state.discoveryWarning ? ` Search warning: ${state.discoveryWarning}` : '';
+      const checked = state.lastCheckAt ? ` Last completed check: ${new Date(state.lastCheckAt).toLocaleString()}.` : '';
+      return status + warning + checked;
     }
     function renderProjectChecks(container) {
       const checks = getState().telegram?.recentChecks || [];
@@ -165,7 +171,7 @@
         });
       } },
       F('h3', {}, 'Telegram project notifications'),
-      F('p', {}, 'Checks every minute while Chrome is running and you are signed in to Workana. Uses your saved Project Filter and Client Filter / Specific Project settings. Auto-Bid and an OpenAI key are not required.'),
+      F('p', {}, 'Checks every minute while Chrome is running and you are signed in to Workana. Uses your saved Project Filter. A client qualifies with a rating above 3, verified payment, or a join date in 2024 or later. Auto-Bid and an OpenAI key are not required.'),
       B('Enable Telegram notifications', telegram.enabled, value => { telegram.enabled = value; }),
       L('Bot token from @BotFather', R(telegram.botToken, value => { telegram.botToken = value; }, { type: 'password', autoComplete: 'off' })),
       F('div', { class: 'field' },

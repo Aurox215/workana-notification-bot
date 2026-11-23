@@ -33,14 +33,14 @@
     if (!chats.size) throw Error('No chat found yet. Open your bot in Telegram, send it a new message such as hello, then click Find my chat ID again. For a group, send /start@YourBotUsername in that group.');
     return { chats: [...chats.values()] };
   }
-  async function send(settings, text, fetcher = fetch) {
+  async function send(settings, text, fetcher = fetch, replyMarkup) {
     validate(settings, true);
     let response, result;
     try {
       response = await fetcher(`https://api.telegram.org/bot${settings.botToken}/sendMessage`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         credentials: 'omit', signal: AbortSignal.timeout(20000),
-        body: JSON.stringify({ chat_id: settings.chatId, text: text.slice(0, 4000), link_preview_options: { is_disabled: true } })
+        body: JSON.stringify({ chat_id: settings.chatId, text: text.slice(0, 4000), reply_markup: replyMarkup, link_preview_options: { is_disabled: true } })
       });
       result = await response.json();
     } catch { throw Error('Telegram request failed. Check your connection and bot token.'); }
@@ -68,59 +68,111 @@
     if (project.publishedPrecision === 'day') return new Date(project.publishedAt).toISOString().slice(0, 10) + ' (exact time not provided by Workana)';
     return 'Exact time not provided by Workana (relative age only)';
   }
+  function publicationDisplay(project, now) {
+    if (!Number.isFinite(project.publishedAt)) return '—';
+    if (project.publishedPrecision === 'exact') return publishedTime(project);
+    if (project.publishedPrecision === 'day') {
+      return new Date(project.publishedAt).toLocaleDateString('en', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+    }
+    return 'about ' + publishedAge(project, now);
+  }
+  function calendarBounds(project) {
+    // A calendar date without a timezone can span UTC-12 through UTC+14.
+    const hour = 3600000;
+    return { earliest: project.publishedAt - 14 * hour, end: project.publishedAt + 36 * hour };
+  }
   function selectPublication(candidate, details) {
     const rank = project => !Number.isFinite(project?.publishedAt) ? 0 : ({ exact: 3, relative: 2, day: 1 }[project.publishedPrecision] || 0);
-    const source = rank(details) >= rank(candidate) && rank(details) > 0 ? details : candidate;
+    let source = rank(details) >= rank(candidate) && rank(details) > 0 ? details : candidate;
+    const other = source === candidate ? details : candidate;
+    if (source.publishedPrecision === 'relative' && other?.publishedPrecision === 'day' && Number.isFinite(other.publishedAt)) {
+      const { earliest, end } = calendarBounds(other);
+      if (source.publishedLatestAt < earliest || source.publishedAt >= end) source = other;
+    }
     return { publishedAt: source.publishedAt, publishedPrecision: source.publishedPrecision, publishedLatestAt: source.publishedLatestAt, publishedLabel: source.publishedLabel };
   }
-  function projectMessage(project, context = {}) {
-    const shown = (value, limit = 200) => String(value ?? '').trim().slice(0, limit) || 'Not shown';
+  function registrationDate(value) {
+    const day = typeof value === 'string' && value.match(/^(\d{4}-\d{2}-\d{2})(?:$|[T ])/)?.[1];
+    if (!day) return null;
+    const date = new Date(day);
+    return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === day ? date : null;
+  }
+  function notificationEligibility(project, config, projectFilter) {
+    const verdict = projectFilter(project, config);
+    if (verdict.state !== 'pass') return verdict;
+    if (config.project?.excludeSkills?.length && !project.skills?.length) {
+      return { state: 'waiting', stage: 'project', issues: ['Project skills are unavailable for the exclusion check.'] };
+    }
+
     const client = project.client || {};
+    const rating = Number.isFinite(client.stars) ? client.stars : client.unrated === true ? 0 : null;
+    const joined = registrationDate(client.registeredAt);
+    const criteria = [
+      ['rating', rating === null ? null : rating > 3],
+      ['payment verification', typeof client.verified === 'boolean' ? client.verified : null],
+      ['join date', joined ? joined.getUTCFullYear() > 2023 : null]
+    ];
+    const matched = criteria.filter(([, passed]) => passed === true).length;
+    if (matched >= 1) return { state: 'pass', stage: 'client', issues: [] };
+
+    const missing = criteria.filter(([, passed]) => passed === null).map(([field]) => field);
+    return matched + missing.length >= 1
+      ? { state: 'waiting', stage: 'client', issues: [`Client ${missing.join(', ')} unavailable.`] }
+      : { state: 'fail', stage: 'client', issues: ['Client meets none of the notification criteria.'] };
+  }
+  function projectMessage(project, { now } = {}) {
+    const shown = (value, limit = 200) => String(value ?? '').trim().slice(0, limit) || '—';
+    const count = value => Number.isFinite(value) ? value : '—';
+    const client = project.client || {};
+    const country = (name, code) => {
+      const region = String(code || '').toUpperCase();
+      const flag = /^[A-Z]{2}$/.test(region) ? String.fromCodePoint(...[...region].map(letter => 127397 + letter.charCodeAt(0))) : '';
+      return [flag, shown(name || region)].filter(Boolean).join(' ');
+    };
     const budget = project.budget || {};
-    const amounts = [budget.min, budget.max].filter(Number.isFinite);
-    const range = amounts.length ? [...new Set(amounts)].join(' - ') : '';
-    const budgetText = budget.label || (range ? `${budget.currency && budget.currency !== 'unknown' ? budget.currency + ' ' : ''}${range}${budget.contract === 'hourly' ? ' / hr' : ''}` : '');
-    const stars = Number.isFinite(client.stars) ? `${client.stars} / 5` : client.unrated === true ? '0 / 5' : 'Not shown';
+    const amounts = [...new Set([budget.min, budget.max].filter(Number.isFinite))];
+    const budgetText = budget.label || (amounts.length ? `${budget.currency && budget.currency !== 'unknown' ? budget.currency + ' ' : ''}${amounts.join(' - ')}${budget.contract === 'hourly' ? ' / hr' : ''}` : '');
+    const stars = Number.isFinite(client.stars) ? client.stars : client.unrated === true ? 0 : null;
+    const joined = registrationDate(client.registeredAt);
+    const memberSince = joined ? joined.toLocaleDateString('en', { month: 'long', year: 'numeric', timeZone: 'UTC' }) : '—';
     return [
-      'New matching Workana project',
-      `Project: ${shown(project.title, 700)}`,
-      `URL: ${shown(project.url, 1000)}`,
-      `Published at: ${publishedTime(project)}`,
-      `Published: ${publishedAge(project, context.now)}`,
-      `Budget: ${shown(budgetText, 300)}`,
-      `Skills: ${shown((project.skills || []).join(', '), 700)}`,
+      '🆕 New Workana job',
       '',
-      `Client: ${shown(client.name)}`,
-      `Country: ${shown(client.country || client.nationality || client.countryCode)}`,
-      `Star score: ${stars}`,
-      `Projects paid: ${Number.isFinite(client.paid) ? client.paid : 'Not shown'}`,
-      ...(context.searchName ? [`Search: ${shown(context.searchName)}`] : []),
-      ...(context.matchReason ? [`Matched: ${context.matchReason}`] : [])
+      shown(project.title, 700),
+      `💰 ${shown(budgetText, 300)}`,
+      `📅 Posted: Published: ${publicationDisplay(project, now)} · 💬 Last reply: ${shown(project.lastReply)}${project.country || project.countryCode ? ' · ' + country(project.country, project.countryCode) : ''}`,
+      `🛠️ ${shown((project.skills || []).join(', '), 700)}`,
+      'Client',
+      `👤 ${shown(client.name)} · ⭐ ${stars === null ? '—' : stars.toFixed(stars % 1 === 0 ? 1 : 2).replace(/(\.\d)0$/, '$1') + '/5'} · ${country(client.country || client.nationality, client.countryCode)}`,
+      `📊 ${count(client.published)} published · ${count(client.paid)} paid`,
+      `📅 Member since: ${memberSince}`,
+      `📈 ${count(project.bids)} bids · ${count(project.interested)} interested`,
+      ...(project.url?.length > 256 ? [project.url] : []),
     ].join('\n');
   }
-  function notificationConfig(project, config, now = Date.now()) {
-    if (config.client?.notifyEstablishedClients !== true) return config;
-    const joined = project.client?.registeredAt;
-    if (typeof joined !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(joined)) return config;
-    const date = new Date(`${joined}T00:00:00Z`);
-    if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== joined) return config;
-    const cutoff = new Date(now);
-    cutoff.setUTCFullYear(cutoff.getUTCFullYear() - 2);
-    if (joined >= cutoff.toISOString().slice(0, 10)) return config;
-    // Only notifications relax rating and payment. All other filters still apply.
-    return { ...config, client: { ...config.client, minStars: 0, payment: 'any' } };
+  function projectKeyboard(url) {
+    if (!url) return undefined;
+    const buttons = [{ text: 'Open job ↗️', url }];
+    if (url.length <= 256) buttons.push({ text: '📋 Copy link', copy_text: { text: url } });
+    return { inline_keyboard: [buttons] };
   }
   function publishedSince(project, startedAt) {
     if (!Number.isFinite(project.publishedAt)) return null;
     if (!Number.isFinite(startedAt)) return false;
+    if (project.publishedPrecision === 'day') {
+      const { earliest, end } = calendarBounds(project);
+      if (earliest >= startedAt) return true;
+      return end <= startedAt ? false : null;
+    }
+    if (project.publishedAt > Date.now()) return null;
     if (project.publishedAt >= startedAt) return true;
-    if (project.publishedPrecision === 'relative' && Number.isFinite(project.publishedLatestAt)) return project.publishedLatestAt >= startedAt;
-    // A day-only timestamp is an interval, not proof of a midnight publication.
-    if (project.publishedPrecision === 'day') return project.publishedAt + 86400000 > startedAt ? null : false;
+    if (project.publishedPrecision === 'relative') {
+      return Number.isFinite(project.publishedLatestAt) && project.publishedLatestAt < startedAt ? false : null;
+    }
     return false;
   }
   function filterFingerprint(config) {
-    return JSON.stringify([config.search, config.project, config.client, config.specificProject]);
+    return JSON.stringify([1, config.search, config.project]);
   }
   class Watcher {
     constructor({ storage, config, scan, inspect, eligible, fetcher }) {
@@ -140,7 +192,21 @@
     tick() {
       if (!this.pending) this.pending = this.poll().catch(async error => {
         const state = await this.state();
-        await this.storage.set({ telegram: { ...state, summary: 'Project check stopped before discovery completed.', lastError: String(error.message).replaceAll(state.settings.botToken || '\0', '[token]'), retryAt: Date.now() + (error.retryAfter || 60) * 1000 } });
+        const lastError = String(error.message).replaceAll(state.settings.botToken || '\0', '[token]');
+        let verificationAlertSent = state.verificationAlertSent;
+        let verificationAlertError = '';
+        let retryAfter = error.retryAfter || 60;
+        const verificationRequired = /^(?:Workana requires verification\b|Sign in to Workana and complete its verification\b|Workana returned a (?:sign-in or )?verification page instead of search data\b)/i.test(lastError);
+        if (state.settings.enabled && verificationRequired && !verificationAlertSent) {
+          try {
+            await send(state.settings, 'Workana project alerts are paused because Workana requested verification. Open your signed-in Workana tab and complete any verification shown. The extension will retry automatically.', this.fetcher);
+            verificationAlertSent = true;
+          } catch (deliveryError) {
+            verificationAlertError = ' Could not send the Telegram verification alert. Delivery will be retried.';
+            retryAfter = Math.max(retryAfter, deliveryError.retryAfter || 0);
+          }
+        }
+        await this.storage.set({ telegram: { ...state, verificationAlertSent, summary: 'Project check interrupted.', lastError: lastError + verificationAlertError, retryAt: Date.now() + retryAfter * 1000 } });
       }).finally(() => { this.pending = null; });
       return this.pending;
     }
@@ -148,22 +214,25 @@
       let state = await this.state();
       if (!state.settings.enabled || state.retryAt > Date.now()) return;
       const generation = state.generation;
+      if (!Number.isFinite(state.startedAt)) state.startedAt = Date.now();
       const settings = state.settings;
-      await this.storage.set({ telegram: { ...state, lastAttemptAt: Date.now(), lastError: '', discoveryWarning: '', summary: 'Requesting fresh Workana search results now...' } });
+      await this.storage.set({ telegram: { ...state, lastAttemptAt: Date.now(), lastError: '', discoveryWarning: '', discoverySource: '', searchEndpoint: '', summary: 'Requesting fresh Workana search results now...' } });
       const config = await this.config();
       const scan = await this.scan(settings, config);
       const projects = Array.isArray(scan) ? scan : scan?.projects;
       if (!Array.isArray(projects)) throw Error('Workana did not return a readable project list.');
       const scannedState = await this.state();
       if (scannedState.generation !== generation) return;
-      await this.storage.set({ telegram: { ...scannedState, discoveryWarning: Array.isArray(scan) ? '' : scan.warning || '', discoverySource: Array.isArray(scan) ? '' : scan.source || '', searchEndpoint: Array.isArray(scan) ? '' : scan.endpoint || '' } });
+      await this.storage.set({ telegram: { ...scannedState, verificationAlertSent: false, discoveryWarning: Array.isArray(scan) ? '' : scan.warning || '', discoverySource: Array.isArray(scan) ? '' : scan.source || '', searchEndpoint: Array.isArray(scan) ? '' : scan.endpoint || '' } });
       // Seed only projects that were already present when monitoring began.
       // A delayed first successful scan must still deliver newer publications.
-      if (!state.baseline) {
+      const searchScope = Array.isArray(scan) ? undefined : scan.scope;
+      const scopeChanged = searchScope && state.searchScope !== searchScope;
+      if (!state.baseline || scopeChanged) {
         const current = await this.state();
         if (current.generation !== generation) return;
-        const existing = projects.filter(p => publishedSince(p, state.startedAt) !== true || p.publishedPrecision === 'day');
-        await this.storage.set({ telegram: { ...current, baseline: true, seen: { ...current.seen, ...Object.fromEntries(existing.map(p => [p.id, true])) }, lastCheckAt: Date.now(), lastError: '', summary: `Baseline ready: ${existing.length} existing projects. Watching for new projects.`, recentChecks: existing.slice(0, 30).map(p => ({ id: p.id, title: String(p.title || p.id).slice(0, 300), result: 'baseline', reason: 'Present before monitoring started, or publication time unavailable on the initial scan.', at: Date.now(), publishedLabel: p.publishedLabel || '' })) } });
+        const existing = projects.filter(p => publishedSince(p, state.startedAt) !== true);
+        await this.storage.set({ telegram: { ...current, baseline: true, searchScope, seen: { ...current.seen, ...Object.fromEntries(existing.map(p => [p.id, true])) }, lastCheckAt: Date.now(), lastError: '', summary: `Baseline ready: ${existing.length} existing projects. Watching for new projects.`, recentChecks: existing.slice(0, 30).map(p => ({ id: p.id, title: String(p.title || p.id).slice(0, 300), result: 'baseline', reason: 'Present before monitoring started, or publication time unavailable on the initial scan.', at: Date.now(), publishedLabel: p.publishedLabel || '' })) } });
         if (existing.length === projects.length) return;
       }
       let sent = 0, filtered = 0, waiting = 0, alreadySeen = 0, older = 0;
@@ -184,17 +253,16 @@
         // A project-page request is enrichment, not an unconditional gate. Search
         // evidence may already prove every enabled filter and the publication time.
         const preConfig = await this.config();
-        const preVerdict = this.eligible(candidate, notificationConfig(candidate, preConfig));
+        const preVerdict = this.eligible(candidate, preConfig);
         const owner = candidate.client || {};
-        const complete = candidate.publishedPrecision === 'exact' && owner.name && (owner.country || owner.countryCode) && (Number.isFinite(owner.stars) || owner.unrated === true) && Number.isFinite(owner.paid) && candidate.skills?.length && candidate.budget?.label;
-        const definitiveRejection = preVerdict.state === 'fail' && !(preVerdict.stage === 'client' && preConfig.client?.notifyEstablishedClients && !owner.registeredAt);
+        const complete = candidate.publishedPrecision === 'exact' && owner.name && (owner.country || owner.countryCode) && Number.isFinite(owner.stars) && Number.isFinite(owner.paid) && Number.isFinite(owner.published) && owner.registeredAt && candidate.skills?.length && candidate.budget?.label && Number.isFinite(candidate.bids) && Number.isFinite(candidate.interested);
         let project = candidate, detailError = '';
-        if (!definitiveRejection && (preVerdict.state !== 'pass' || !complete)) {
+        if (preVerdict.state !== 'fail' && (preVerdict.state !== 'pass' || !complete)) {
           try { project = await this.inspect(candidate); }
           catch (error) { detailError = String(error.message || 'Details unavailable').replaceAll(settings.botToken || '\0', '[token]').slice(0, 250); }
         }
         const freshConfig = await this.config();
-        const verdict = this.eligible(project, notificationConfig(project, freshConfig));
+        const verdict = this.eligible(project, freshConfig);
         if (detailError && (verdict.state !== 'pass' || publishedSince(project, state.startedAt) !== true)) {
           const reason = `${detailError} Required evidence: ${(verdict.issues || []).join(' ') || 'publication time'}`;
           failures.push(`Project ${candidate.id}: ${reason}`);
@@ -212,17 +280,18 @@
         const current = await this.state();
         if (!current.settings.enabled || current.generation !== generation) return;
         const recency = publishedSince(project, state.startedAt);
-        if (recency === null) { waiting++; await this.remember(project, 'waiting', 'Publication time is not readable yet; cannot confirm this is a new posting.', generation); continue; }
-        if (verdict.state === 'pass' && recency === true) {
-          const normalClient = this.eligible(project, { ...freshConfig, specificProject: { ...freshConfig.specificProject, enabled: false } });
-          const adjustedConfig = notificationConfig(project, freshConfig);
-          const adjustedClient = this.eligible(project, { ...adjustedConfig, specificProject: { ...freshConfig.specificProject, enabled: false } });
-          const matchReason = normalClient.state === 'pass' ? 'Project Filter + Client Filter' : adjustedClient.state === 'pass' ? 'Project Filter + client joined more than 2 years ago (rating/payment exception)' : 'Project Filter + Specific Project';
-          await send(settings, projectMessage(project, { searchName: freshConfig.search?.useCurrentFilters ? 'Current Workana filters' : freshConfig.search?.savedSearchName, matchReason }), this.fetcher);
-          sent++;
-          await this.remember(project, 'notified', `Telegram confirmed delivery. ${matchReason}. Published: ${publishedAge(project)}`, generation, { seen: { ...current.seen, [project.id]: true }, lastNotificationAt: Date.now() });
+        if (recency === null) {
+          waiting++;
+          await this.remember(project, 'waiting', 'Workana publication time does not confirm this project was posted after monitoring began.', generation);
           continue;
-        } else if (verdict.state === 'pass') older++;
+        }
+        if (recency === true) {
+          await send(settings, projectMessage(project), this.fetcher, projectKeyboard(project.url));
+          sent++;
+          await this.remember(project, 'notified', `Telegram confirmed delivery. Published: ${publicationDisplay(project)}`, generation, { seen: { ...current.seen, [project.id]: true }, lastNotificationAt: Date.now() });
+          continue;
+        }
+        older++;
         await this.remember(project, 'older', 'Published before monitoring started.', generation, { seen: { ...current.seen, [candidate.id]: true } });
       }
       state = await this.state();
@@ -249,9 +318,9 @@
       const settings = Object.fromEntries(Object.keys(defaults()).map(k => [k, typeof message.settings[k] === 'string' ? message.settings[k].trim() : message.settings[k]]));
       validate(settings);
       const reset = !previous.settings.enabled || previous.settings.chatId !== settings.chatId || previous.settings.botToken !== settings.botToken;
-      await this.storage.set({ telegram: { ...previous, settings, generation: (previous.generation || 0) + 1, retryAt: 0, lastError: '', ...(reset ? { baseline: false, seen: {}, rejected: {}, recentChecks: [], startedAt: Date.now() } : {}) } });
+      await this.storage.set({ telegram: { ...previous, settings, generation: (previous.generation || 0) + 1, retryAt: 0, lastError: '', ...(reset ? { baseline: false, verificationAlertSent: false, seen: {}, rejected: {}, recentChecks: [], startedAt: Date.now() } : {}) } });
       void this.tick();
     }
   }
-  globalThis.WorkanaTelegram = { defaults, validate, send, findChats, notificationConfig, publishedAge, publishedTime, selectPublication, projectMessage, Watcher };
+  globalThis.WorkanaTelegram = { defaults, validate, send, findChats, notificationEligibility, publishedAge, publishedTime, selectPublication, projectMessage, Watcher };
 })();

@@ -148,10 +148,10 @@ async function main() {
       if (message.method === 'Fetch.requestPaused') {
         const url = new URL(message.params.request.url);
         let body = url.pathname.includes('/job/')
-          ? `<html><head><title>Project details</title></head><body><main><h1>${url.pathname.split('/').pop()} React project</h1><span data-project-category="it-programming">IT &amp; Programming</span><time datetime="${new Date(Date.now()-120000).toISOString()}"></time><div data-project-description>Build a React app.</div><span data-skill="React">React</span><span class="budget">USD 500 - 1,000</span></main><aside data-client-profile><span data-client-name="Ana">Ana</span><span data-country="Brazil" data-country-code="BR"></span><span data-rating="4.8"></span><span data-payment-verified="true"></span><p>Projects published: 10</p><p>Projects paid: 8</p><p>Member since: January 2020</p></aside></body></html>`
+          ? `<html><head><title>Project details</title></head><body><main><h1>${url.pathname.split('/').pop()} React project</h1><span data-project-category="it-programming">IT &amp; Programming</span><div class="last-reply"><time datetime="2026-01-01T00:00:00Z"></time></div><time itemprop="datePosted" datetime="${new Date(Date.now()-120000).toISOString()}"></time><div data-project-description>Build a React app.</div><div data-project-activity><span data-last-reply="just now"></span><span data-interested-count="0"></span></div><span data-skill="React">React</span><span class="budget">USD 500 - 1,000</span></main><aside data-client-profile><span data-client-name="Ana">Ana</span><span data-country="Brazil" data-country-code="BR"></span><span data-rating="4.8"></span><span data-payment-verified="false"></span><p>Projects published: 10</p><p>Projects paid: 8</p><p>Member since: January 2020</p></aside></body></html>`
           : `<html><head><title>Workana projects</title></head><body><div class="saved-search"><ul class="multi-select-selection-list"><li><span>All</span><button aria-label="Remove All">×</button></li></ul></div><main>${card('baseline-project')}</main><script>fetch('/api/projects/search?category=it-programming&page=1').then(r=>r.json()).catch(()=>{});</script></body></html>`;
         const isApi = url.pathname === '/api/projects/search';
-        if (isApi) { apiCalls++; const secondPage = url.searchParams.get('page') === '2'; body = blockApi ? '<html><title>Just a moment...</title></html>' : JSON.stringify({ html: secondPage ? includeNew ? card('automatic-new-project') : '<div data-no-results>No projects</div>' : card('baseline-project'), projects: includeComplete && secondPage ? [{ slug: 'complete-api-only', title: 'Complete API project', category_slug: 'it-programming', published_at: new Date(Date.now()-120000).toISOString(), skills: ['React'], budget: 'USD 500', client: { name: 'Ana', country: 'Brazil', rating: 5, paid_projects: 8, published_projects: 10, verified_payment: true } }] : [], links: { next: secondPage ? null : '?category=it-programming&page=2' } }); }
+        if (isApi) { apiCalls++; const secondPage = url.searchParams.get('page') === '2'; body = blockApi ? '<html><title>Just a moment...</title></html>' : JSON.stringify({ html: secondPage ? includeNew ? card('automatic-new-project') : '<div data-no-results>No projects</div>' : card('baseline-project'), projects: includeNew && secondPage ? [{ slug: 'client-filter-rejection', title: 'Ineligible client project', category_slug: 'it-programming', published_at: new Date(Date.now()-120000).toISOString(), client: { rating: 3, verified_payment: false, registered_at: '2023-12-31' } }, ...(includeComplete ? [{ slug: 'complete-api-only', title: 'Complete API project', category_slug: 'it-programming', published_at: new Date(Date.now()-120000).toISOString(), skills: ['React'], budget: 'USD 500', description: 'Build a React app.', bids_count: 0, interested_count: 0, client: { name: 'Ana', country: 'Brazil', rating: 5, paid_projects: 8, published_projects: 10, verified_payment: true, registered_at: '2024-01-01' } }] : [])] : [], links: { next: secondPage ? null : '?category=it-programming&page=2' } }); }
         if (url.pathname.includes('/job/') && blockProjects) { blockedProjectPaths.push(url.pathname); body = '<html><title>Forbidden</title></html>'; }
         void fixtureSend('Fetch.fulfillRequest', { requestId: message.params.requestId, responseCode: isApi && blockApi || url.pathname.includes('/job/') && blockProjects ? 403 : 200, responseHeaders: [{ name: 'Content-Type', value: isApi && !blockApi ? 'application/json' : 'text/html;charset=utf-8' }], body: Buffer.from(body).toString('base64') });
       }
@@ -178,14 +178,19 @@ async function main() {
       const automatic = await workerEvaluate('telegramSent');
       assert.equal(automatic.length, 1, 'New project notification failed: '+await evaluate(`(async()=>JSON.stringify((await chrome.storage.local.get('telegram')).telegram))()`));
       assert.match(automatic[0].text, /automatic-new-project/);
-      assert.match(automatic[0].text, /Client: Ana/);
-      assert.match(automatic[0].text, /Projects paid: 8/);
-      assert.match(automatic[0].text, /Published: 2 minutes ago/);
-      assert.match(automatic[0].text, /Published at: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC/);
-      assert.match(automatic[0].text, /Search: All/);
-      assert.match(automatic[0].text, /Matched: Project Filter \+ Client Filter/);
+      assert.match(automatic[0].text, /👤 Ana · ⭐ 4.8\/5 · 🇧🇷 Brazil/);
+      assert.match(automatic[0].text, /10 published · 8 paid/);
+      assert.match(automatic[0].text, /Member since: January 2020/);
+      assert.match(automatic[0].text, /83 bids · 0 interested/);
+      assert.match(automatic[0].text, /Published: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC · 💬 Last reply: just now/);
+      assert.doesNotMatch(automatic[0].text, /Build a React app\./);
+      assert.deepEqual(automatic[0].reply_markup.inline_keyboard, [[
+        { text: 'Open job ↗️', url: 'https://www.workana.com/job/automatic-new-project' },
+        { text: '📋 Copy link', copy_text: { text: 'https://www.workana.com/job/automatic-new-project' } }
+      ]]);
       const check = await evaluate(`(async()=>{const reply=await chrome.runtime.sendMessage({kind:'CHECK_TELEGRAM'});if(!reply.ok)throw Error(reply.error);return reply.data.telegram.summary})()`);
       assert.match(check, /2 already seen/);
+      assert.match(check, /1 filtered out/);
       assert.equal(await workerEvaluate('telegramSent.length'), 1, 'manual recheck must not duplicate notifications');
       assert.ok(apiCalls >= 2, 'fresh API requests must run after initial page rendering');
       const visibleNew = await fixtureSend('Runtime.evaluate', { expression: 'document.body.innerText.includes("automatic-new-project")', returnByValue: true });
@@ -205,8 +210,12 @@ async function main() {
       blockApi = true;
       await fixtureSend('Runtime.evaluate', { expression: `document.querySelector('main').insertAdjacentHTML('beforeend',${JSON.stringify(card('visible-only-project'))})` });
       const fallback = await evaluate(`(async()=>{const reply=await chrome.runtime.sendMessage({kind:'CHECK_TELEGRAM'});if(!reply.ok)throw Error(reply.error);return reply.data.telegram})()`);
-      assert.match(fallback.lastError, /search request failed/);
-      assert.equal(await workerEvaluate('telegramSent.length'), 2, 'failed API requests must never fall back to visible cards');
+      assert.match(fallback.lastError, /Workana requires verification/);
+      assert.equal(fallback.discoverySource, '', 'a blocked scan must not show the previous search source');
+      assert.equal(await workerEvaluate('telegramSent.length'), 3, 'the blocked scan must send one verification alert');
+      assert.match(await workerEvaluate('telegramSent[2].text'), /Workana requested verification/);
+      await evaluate("chrome.runtime.sendMessage({kind:'CHECK_TELEGRAM'})");
+      assert.equal(await workerEvaluate('telegramSent.length'), 3, 'a repeated blocked scan must not duplicate the alert or send visible cards');
       assert.equal((await fixtureSend('Runtime.evaluate', { expression: 'document.querySelectorAll(\'iframe[title="Workana notification search"]\').length', returnByValue: true })).result.value, 0, 'temporary render frames must be removed');
       await evaluate(`chrome.runtime.sendMessage({kind:'SAVE_TELEGRAM',settings:{enabled:false,botToken:'123456:abcdefghijklmnopqrstuvwxyz',chatId:'123456789'}})`);
       await workerEvaluate(`globalThis.fetch=globalThis.originalFetch;true`);
@@ -239,7 +248,7 @@ async function main() {
     assert.ok(filterContent.includes('Exclude skills'));
     for (const label of ['Project pricing', 'Budget type', 'Minimum project budget', 'Maximum project budget', 'Workana budget ranges']) assert.ok(!filterContent.includes(label), label + ' must be removed');
     await evaluate(`[...document.querySelectorAll('button')].find(b=>b.textContent==='Client Filter').click()`);
-    assert.ok(await evaluate(`document.body.innerText.includes('Notify for clients who joined more than 2 years ago')`));
+    assert.ok(await evaluate(`document.body.innerText.includes('Minimum client rating (stars)')`));
     assert.deepEqual(errors, []);
     console.log('PASS: session-backed search and detail requests notify new projects absent from the visible page; complete API rows notify without project-page access; exact timestamps and API failures are handled correctly.');
     await send('Browser.close');

@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 require('./telegram.js');
-const { Watcher, validate, send, findChats, notificationConfig, publishedAge, publishedTime, selectPublication, projectMessage } = global.WorkanaTelegram;
+const { Watcher, validate, send, findChats, notificationEligibility, publishedAge, publishedTime, selectPublication, projectMessage } = global.WorkanaTelegram;
 const fs = require('node:fs');
 const vm = require('node:vm');
 const settings = { enabled: true, botToken: '123456:abcdefghijklmnopqrstuvwxyz', chatId: '1234', searchUrl: '' };
@@ -11,29 +11,16 @@ test('notification publication ages are calculated at send time', () => {
   assert.equal(publishedAge({ publishedAt: now - 3600000 }, now), '1 hour ago');
   assert.equal(publishedAge({ publishedAt: now - 86400000 }, now), '1 day ago');
   assert.equal(publishedAge({ publishedAt: null }, now), 'Not shown');
-  assert.match(projectMessage({ title: 'React app', publishedAt: now - 120000 }, { now }), /Published: 2 minutes ago/);
+    const message = projectMessage({ title: 'React app', publishedAt: Date.parse('2026-11-18'), publishedPrecision: 'day', description: 'Private draft' }, { now });
+  assert.match(message, /Published: November 18, 2026/);
+  assert.doesNotMatch(message, /Private draft|hours ago/);
   assert.equal(publishedTime({ publishedAt: now - 120000, publishedPrecision: 'exact' }), '2026-11-18 11:58:00 UTC');
   assert.match(publishedTime({ publishedAt: now - 120000, publishedPrecision: 'relative' }), /Exact time not provided/);
   const exact = { publishedAt: now - 120000, publishedPrecision: 'exact' };
   assert.equal(selectPublication(exact, { publishedAt: now - 180000, publishedPrecision: 'relative' }).publishedPrecision, 'exact');
   assert.equal(selectPublication({}, exact).publishedAt, exact.publishedAt);
-});
-test('established-client notification exception uses a strict two-year boundary and preserves other filters', () => {
-  const now = Date.parse('2026-11-17T12:00:00Z');
-  const config = { client: { notifyEstablishedClients: true, minStars: 4, payment: 'verified', minPaidPercent: 50, registeredAfter: '2020-01-01' }, project: { excludeSkills: ['WordPress'] } };
-  for (const registeredAt of ['2024-11-17', '2024-11-18', undefined, '', 'invalid', '2023-02-30']) {
-    assert.equal(notificationConfig({ client: { registeredAt } }, config, now), config);
-  }
-  const old = { client: { registeredAt: '2024-11-16', unrated: true, verified: false } };
-  const adjusted = notificationConfig(old, config, now);
-  assert.equal(adjusted.client.minStars, 0);
-  assert.equal(adjusted.client.payment, 'any');
-  assert.equal(adjusted.client.minPaidPercent, 50);
-  assert.equal(adjusted.client.registeredAfter, '2020-01-01');
-  assert.equal(adjusted.project, config.project);
-  assert.equal(config.client.minStars, 4, 'must not alter Auto-Bid settings');
-  const disabled = { ...config, client: { ...config.client, notifyEstablishedClients: false } };
-  assert.equal(notificationConfig(old, disabled, now), disabled);
+  const conflictingRelative = { publishedPrecision: 'relative', publishedAt: now - 7 * 86400000, publishedLatestAt: now - 6 * 86400000 };
+  assert.equal(selectPublication(conflictingRelative, { publishedPrecision: 'day', publishedAt: Date.parse('2026-11-18') }).publishedPrecision, 'day');
 });
 test('legacy budget restrictions do not block projects in worker or page eligibility', () => {
   const context = vm.createContext({ structuredClone, AbortSignal, URL });
@@ -136,6 +123,36 @@ function fixture() {
   const options = { storage: { get: async () => structuredClone(values), set: async update => Object.assign(values, structuredClone(update)) }, config: async () => ({}), scan: async () => projects, inspect: async p => ({ publishedAt: Date.now(), publishedPrecision: 'exact', ...p }), eligible: () => ({ state: verdict }), fetcher: async (url, options) => { requests.push(JSON.parse(options.body)); return { ok: true, json: async () => ({ ok: true }) }; } };
   return { values, requests, options, watcher: new Watcher(options), projects: p => { projects = p; }, verdict: v => { verdict = v; } };
 }
+test('a verification alert is retried on Telegram failure and sent once until a successful scan', async () => {
+  const f = fixture();
+  let scanError = 'Workana requires verification. Open Workana and retry.';
+  let rejectMessage = true;
+  f.options.scan = async () => {
+    if (scanError) throw Error(scanError);
+    return [];
+  };
+  const fetcher = f.options.fetcher;
+  f.options.fetcher = async (...args) => rejectMessage ? { ok: false, status: 429, json: async () => ({ ok: false, parameters: { retry_after: 120 } }) } : fetcher(...args);
+  const check = () => new Watcher(f.options).action({ kind: 'CHECK_TELEGRAM' });
+
+  await check();
+  assert.match(f.values.telegram.lastError, /Could not send the Telegram verification alert/);
+  assert.ok(f.values.telegram.retryAt > Date.now() + 60000);
+  rejectMessage = false;
+  await check();
+  await check();
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.requests[0].chat_id, settings.chatId);
+  assert.match(f.requests[0].text, /project alerts are paused because Workana requested verification/);
+  scanError = 'Workana search request failed (500).';
+  await check();
+  assert.equal(f.requests.length, 1);
+  scanError = '';
+  await check();
+  scanError = 'Workana requires verification.';
+  await check();
+  assert.equal(f.requests.length, 2);
+});
 test('a delayed first scan notifies a project published after enabling instead of baselining it', async () => {
   const f = fixture();
   const now = Date.now();
@@ -154,9 +171,9 @@ test('a delayed first scan notifies a project published after enabling instead o
 });
 test('a filter rejection is rechecked after filters change, without resending delivered projects', async () => {
   const f = fixture();
-  let config = { client: { minStars: 5 } };
+  let config = { project: { excludeSkills: ["React"] } };
   f.options.config = async () => config;
-  f.options.eligible = (_project, current) => ({ state: current.client.minStars > 0 ? 'fail' : 'pass', issues: ['Client rating below minimum.'] });
+  f.options.eligible = (_project, current) => ({ state: current.project.excludeSkills.length > 0 ? 'fail' : 'pass', issues: ['Excluded skill.'] });
   const watcher = new Watcher(f.options);
   await watcher.tick();
   f.projects([{ id: 'newly-eligible', title: 'New project' }]);
@@ -164,7 +181,7 @@ test('a filter rejection is rechecked after filters change, without resending de
   assert.equal(f.requests.length, 0);
   assert.equal(f.values.telegram.seen['newly-eligible'], undefined);
   assert.equal(f.values.telegram.recentChecks[0].result, 'filtered');
-  config = { client: { minStars: 0 } };
+  config = { project: { excludeSkills: [] } };
   await watcher.tick();
   assert.equal(f.requests.length, 1);
   await watcher.tick();
@@ -177,12 +194,12 @@ test('baseline skips old listings, only matching new projects notify, restart de
   f.projects([{ id: 'new', title: '<React>', url: 'https://www.workana.com/job/new', publishedAt: Date.now(), publishedPrecision: 'exact', budget: { label: 'USD 500 - 1,000' }, skills: ['React', 'Node.js'], client: { name: 'Ana', country: 'Brazil', stars: 4.8, paid: 12 } }]);
   await Promise.all([f.watcher.tick(), f.watcher.tick()]);
   assert.equal(f.requests.length, 1);
-  assert.equal(f.requests[0].text.replace(/^Published at: .+\n/m, ''), [
-    'New matching Workana project', 'Project: <React>',
-    'URL: https://www.workana.com/job/new', 'Published: just now', 'Budget: USD 500 - 1,000',
-    'Skills: React, Node.js', '', 'Client: Ana', 'Country: Brazil',
-    'Star score: 4.8 / 5', 'Projects paid: 12', 'Matched: Project Filter + Client Filter'
-  ].join('\n'));
+  assert.match(f.requests[0].text, /New Workana job\n\n<React>\n💰 USD 500 - 1,000/);
+  assert.match(f.requests[0].text, /🛠️ React, Node.js\nClient\n👤 Ana · ⭐ 4.8\/5 · Brazil/);
+  assert.deepEqual(f.requests[0].reply_markup.inline_keyboard, [[
+    { text: 'Open job ↗️', url: 'https://www.workana.com/job/new' },
+    { text: '📋 Copy link', copy_text: { text: 'https://www.workana.com/job/new' } }
+  ]]);
   await new Watcher(f.options).tick();
   assert.equal(f.requests.length, 1);
   f.projects([{ id: 'excluded' }]); f.verdict('fail');
@@ -193,10 +210,10 @@ test('notification preserves zero client figures and distinguishes missing detai
   const f = fixture(); await f.watcher.tick();
   f.projects([{ id: 'zero', budget: { min: 15, max: 45, currency: 'USD', contract: 'hourly' }, client: { countryCode: 'BR', unrated: true, paid: 0 } }, { id: 'unknown' }]);
   await f.watcher.tick();
-  assert.match(f.requests[0].text, /Budget: USD 15 - 45 \/ hr/);
-  assert.match(f.requests[0].text, /Country: BR\nStar score: 0 \/ 5\nProjects paid: 0/);
-  assert.match(f.requests[1].text, /Budget: Not shown\nSkills: Not shown/);
-  assert.match(f.requests[1].text, /Client: Not shown\nCountry: Not shown\nStar score: Not shown\nProjects paid: Not shown/);
+  assert.match(f.requests[0].text, /💰 USD 15 - 45 \/ hr/);
+  assert.match(f.requests[0].text, /⭐ 0.0\/5 · 🇧🇷 BR\n📊 — published · 0 paid/);
+  assert.match(f.requests[1].text, /💰 —\n📅 Posted:/);
+  assert.match(f.requests[1].text, /Client\n👤 — · ⭐ — · —\n📊 — published · — paid/);
 });
 test('missing client details wait; failures retain candidate and retry after restart', async () => {
   const f = fixture(); await f.watcher.tick();
@@ -216,9 +233,10 @@ test('one failed detail request cannot block later projects and remains retryabl
   const f = fixture();
   await f.watcher.tick();
   let unavailable = true;
+  f.options.eligible = project => ({ state: project.id === 'unavailable' && !project.client ? 'waiting' : 'pass', issues: ['Client details unavailable.'] });
   f.options.inspect = async project => {
     if (project.id === 'unavailable' && unavailable) throw Error('Details temporarily unavailable');
-    return { publishedAt: Date.now(), publishedPrecision: 'exact', ...project };
+    return { publishedAt: Date.now(), publishedPrecision: 'exact', ...project, client: { verified: true } };
   };
   f.projects([{ id: 'unavailable' }, { id: 'matching', title: 'New React project' }]);
   const watcher = new Watcher(f.options);
@@ -237,7 +255,7 @@ test('one failed detail request cannot block later projects and remains retryabl
 test('complete search evidence notifies without making a project-page request', async () => {
   const f = fixture(); await f.watcher.tick();
   f.options.inspect = async () => assert.fail('complete search matches must not depend on project-page access');
-  f.projects([{ id: 'complete-api', title: 'API project', category: 'it-programming', publishedAt: Date.now(), publishedPrecision: 'exact', skills: ['React'], budget: { label: 'USD 500' }, client: { name: 'Ana', country: 'Brazil', stars: 5, paid: 0, verified: true } }]);
+  f.projects([{ id: 'complete-api', title: 'API project', category: 'it-programming', publishedAt: Date.now(), publishedPrecision: 'exact', skills: ['React'], budget: { label: 'USD 500' }, client: { name: 'Ana', country: 'Brazil', stars: 5, paid: 0, verified: true, published: 1, registeredAt: "2024-01-01" }, description: "Build an app", bids: 0, interested: 0 }]);
   await new Watcher(f.options).tick();
   assert.equal(f.requests.length, 1);
   assert.equal(f.values.telegram.lastError, '');
@@ -267,16 +285,27 @@ test('API scan results retain coverage warnings and deliver matching projects', 
   assert.equal(f.values.telegram.discoveryWarning, 'More API pages are available.');
   assert.equal(f.values.telegram.recentChecks[0].result, 'notified');
 });
-test('unreadable publication time is retried instead of labeling an old discovery as new', async () => {
-  const f = fixture(); await f.watcher.tick();
-  f.projects([{ id: 'unknown-time', publishedAt: null }]);
+test('matching listings without proof of publication after monitoring wait for better evidence', async () => {
+  const f = fixture();
+  const startedAt = Date.parse('2026-11-18T12:00:00Z');
+  f.values.telegram.startedAt = startedAt;
+  await f.watcher.tick();
+  f.projects([
+    { id: 'unknown', publishedAt: null },
+    { id: 'calendar-day', publishedAt: Date.parse('2026-11-18'), publishedPrecision: 'day' },
+    { id: 'overlapping-relative', publishedAt: startedAt - 1000, publishedLatestAt: startedAt + 1000, publishedPrecision: 'relative' },
+    { id: 'older', publishedAt: startedAt - 86400000, publishedPrecision: 'exact' }
+  ]);
   await f.watcher.tick();
   assert.equal(f.requests.length, 0);
-  assert.equal(f.values.telegram.seen['unknown-time'], undefined);
-  assert.match(f.values.telegram.recentChecks[0].reason, /Publication time is not readable/);
-  f.projects([{ id: 'unknown-time', publishedAt: Date.now() }]);
+  for (const id of ['unknown', 'calendar-day', 'overlapping-relative']) {
+    assert.equal(f.values.telegram.recentChecks.find(p => p.id === id).result, 'waiting');
+  }
+  assert.equal(f.values.telegram.recentChecks.find(p => p.id === 'older').result, 'older');
+  f.projects([{ id: 'unknown', publishedAt: startedAt + 60000, publishedPrecision: 'exact' }]);
   await f.watcher.tick();
   assert.equal(f.requests.length, 1);
+  assert.match(f.requests[0].text, /Published: 2026-11-18 12:01:00 UTC/);
 });
 test('disabled watcher does not scan, validates credentials and honors Telegram errors', async () => {
   const f = fixture(); f.values.telegram.settings = { ...settings, enabled: false };
@@ -297,41 +326,36 @@ test('manual project check bypasses backoff and reports actual discovery without
   assert.ok(f.values.telegram.lastAttemptAt);
   assert.equal(f.values.telegram.baseline, true);
 });
-test('watcher uses the real project and client filters, including excluded skills and unknown ratings', async () => {
+test('watcher requires the real project filter and any one client criterion', async () => {
   const context = vm.createContext({ structuredClone, AbortSignal, URL });
   vm.runInContext(fs.readFileSync('integrations.js', 'utf8'), context);
   const source = fs.readFileSync('background.js', 'utf8').replace('import "./integrations.js";', '').replace('import "./telegram.js";', '');
-  vm.runInContext(source.slice(0, source.indexOf('let I=new Ue')) + ';globalThis.filters={defaults:O,eligible:ot};})();', context);
+  vm.runInContext(source.slice(0, source.indexOf('let I=new Ue')) + ';globalThis.filters={defaults:O,project:it};})();', context);
   const config = context.filters.defaults();
   config.project.excludeSkills = ['WordPress'];
-  config.client.minStars = 4;
   const f = fixture();
   f.options.config = async () => config;
-  f.options.eligible = context.filters.eligible;
+  f.options.eligible = (project, current) => notificationEligibility(project, current, context.filters.project);
   const watcher = new Watcher(f.options);
   await watcher.tick();
+  const client = { stars: 3, verified: false, registeredAt: '2023-12-31' };
+  const project = { category: 'it-programming', skills: ['React'] };
   f.projects([
-    { id: 'excluded', category: 'it-programming', skills: ['WordPress'], client: { stars: 5 } },
-    { id: 'low', category: 'it-programming', skills: ['React'], client: { stars: 2 } },
-    { id: 'missing', category: 'it-programming', skills: ['React'], client: {} },
-    { id: 'match', category: 'it-programming', skills: ['React'], client: { stars: 5 } }
+    { ...project, id: 'excluded', skills: ['WordPress'], client: { stars: 5 } },
+    { ...project, id: 'missing-skills', skills: [], client: { stars: 5 } },
+    { ...project, id: 'wrong-category', category: 'legal', client: { stars: 5 } },
+    { ...project, id: 'no-match', client },
+    { ...project, id: 'unknown', client: {} },
+    { ...project, id: 'rating', client: { ...client, stars: 3.1 } },
+    { ...project, id: 'verified', client: { verified: true } },
+    { ...project, id: 'joined', client: { ...client, registeredAt: '2024-01-01' } },
+    { ...project, id: 'invalid-date', client: { ...client, registeredAt: '2024-02-30' } }
   ]);
   await watcher.tick();
-  assert.equal(f.requests.length, 1);
-  assert.equal(f.values.telegram.seen.match, true);
-  assert.equal(f.values.telegram.seen.missing, undefined);
-  config.client.notifyEstablishedClients = true;
-  config.client.payment = 'verified';
-  config.client.minPaidPercent = 50;
-  f.projects([
-    { id: 'established', category: 'it-programming', skills: ['React'], client: { registeredAt: '2000-01-01', unrated: true, verified: false, published: 10, paid: 8 } },
-    { id: 'recent', category: 'it-programming', skills: ['React'], client: { registeredAt: '2099-01-01', unrated: true, verified: false, published: 10, paid: 8 } },
-    { id: 'established-excluded', category: 'it-programming', skills: ['WordPress'], client: { registeredAt: '2000-01-01', published: 10, paid: 8 } },
-    { id: 'established-low-ratio', category: 'it-programming', skills: ['React'], client: { registeredAt: '2000-01-01', published: 10, paid: 1 } }
-  ]);
-  await watcher.tick();
-  assert.equal(f.requests.length, 2, 'only the established eligible client adds a notification');
-  assert.equal(f.values.telegram.seen.established, true);
-  assert.match(f.requests[1].text, /Matched: .*joined more than 2 years ago/);
-  assert.equal(context.filters.eligible({ category: 'it-programming', skills: ['React'], client: { registeredAt: '2000-01-01', unrated: true, verified: false } }, config).state, 'fail', 'normal Auto-Bid eligibility remains strict');
+  assert.equal(f.requests.length, 3);
+  for (const id of ['rating', 'verified', 'joined']) assert.equal(f.values.telegram.seen[id], true);
+  assert.equal(f.values.telegram.recentChecks.find(p => p.id === 'no-match').result, 'filtered');
+  assert.equal(f.values.telegram.recentChecks.find(p => p.id === 'missing-skills').result, 'waiting');
+  assert.equal(f.values.telegram.recentChecks.find(p => p.id === 'unknown').result, 'waiting');
+  assert.equal(f.values.telegram.recentChecks.find(p => p.id === 'invalid-date').result, 'waiting');
 });

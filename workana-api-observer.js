@@ -1,5 +1,5 @@
 (function () {
-  const VERSION = 3;
+  const VERSION = 4;
   if (globalThis.__workanaSearchRequests?.version === VERSION) return;
   const api = globalThis.WorkanaSearchAPI;
   if (!api) return;
@@ -61,6 +61,13 @@
     }
     return nativeSend.call(this, body);
   };
+  function isVerificationResponse(response, text) {
+    if (response.headers.get('cf-mitigated') === 'challenge') return true;
+    const head = text.trimStart().slice(0, 20000);
+    if (!head.startsWith('<')) return false;
+    const title = head.match(/<title\b[^>]*>([^<]*)<\/title\s*>/i)?.[1] || '';
+    return api.isVerificationTitle(title) || /<form\b[^>]*\bid\s*=\s*["'](?:challenge-form|cf-challenge-form)["']/i.test(head);
+  }
   async function poll(options) {
     const canonical = api.searchUrl(options.url, location.href);
     if (new URL(canonical).origin !== location.origin) throw Error('Open a Workana tab on the same host as the saved search.');
@@ -75,10 +82,10 @@
     const response = await nativeFetch(url.href, { method: recipe.method, headers: recipe.headers, ...(recipe.method === 'POST' ? { body: recipe.body } : {}), credentials: 'include', cache: 'no-store', signal: AbortSignal.timeout(20000) });
     const finalURL = safeURL(response.url);
     if (!finalURL || /\/(?:login|signin|auth|challenge)(?:\/|$)/i.test(finalURL.pathname)) throw Error('Sign in to Workana and complete its verification, then retry the search request.');
-    if (!response.ok) throw Error(`Workana search request failed (${response.status}). Open Workana and complete any requested verification.`);
     const text = await response.text();
+    if (isVerificationResponse(response, text)) throw Error('Workana requires verification. Open Workana, complete the verification there, then check again.');
+    if (!response.ok) throw Error(`Workana search request failed (${response.status}). Try again from a signed-in Workana tab.`);
     if (text.length > 6000000) throw Error('Workana search response is too large.');
-    if (/captcha|Just a moment|cf-chl-|challenge-platform/i.test(text.slice(0, 20000))) throw Error('Workana returned a verification page instead of search data. Complete verification on Workana and retry.');
     return { text, url: canonical, requestUrl: url.href, endpoint: url.pathname, learnedRequest: !!learned && learned.pageUrl === canonical };
   }
   // Request headers and bodies stay in this page's memory; they are never exported
@@ -92,7 +99,7 @@
     if (!returned || returned.id !== identity.id) throw Error('Workana project request redirected to sign-in or another project.');
     const text = await response.text();
     if (text.length > 6000000) throw Error('Workana project response is too large.');
-    if (/Just a moment|cf-chl-|challenge-platform/i.test(text.slice(0, 20000))) throw Error('Workana returned a verification page for the project request.');
+    if (isVerificationResponse(response, text)) throw Error('Workana returned a verification page for the project request.');
     return { text, url: identity.url, requestUrl: response.url };
   }
   globalThis.__workanaSearchRequests = { version: VERSION, poll, project };

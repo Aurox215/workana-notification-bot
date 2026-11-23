@@ -293,13 +293,6 @@ budget type, currency, minimum, maximum and range restrictions are ignored for
 notifications and automatic bids. Budget details remain visible in project cards
 and Telegram messages. Native filters saved on Workana still control its search results.
 
-Client Filter includes **Notify for clients who joined more than 2 years ago**.
-When enabled, Telegram notifications waive rating and payment-verification checks
-for clients with a known registration date strictly before the date two calendar
-years ago. The option defaults to off. Paid-project ratios, registration-date
-limits and project filters still apply. Missing or invalid registration dates do
-not qualify. This exception does not change Auto-Bid eligibility.
-
 ## Telegram project notifications
 
 Reload the unpacked extension in `chrome://extensions` and refresh Workana.
@@ -310,6 +303,11 @@ your bot a fresh `hello` message and click again. If multiple chats appear, choo
 your destination. For groups, add the bot and send `/start@YourBotUsername` in
 the group before finding its ID. Manual entry remains available.
 Use **Send test notification**, enable notifications, then save.
+
+A project must match your saved Project Filter. The client must meet at least
+one of these criteria: rating above 3 out of 5, verified payment, or a Workana
+join date in 2024 or later. Alerts include job and client details where Workana
+provides them, with **Open job** and **Copy link** buttons.
 
 The test button checks Telegram delivery only; it does not enable automatic
 monitoring. The Telegram settings show whether monitoring is off, whether its
@@ -359,25 +357,16 @@ key are not required.
 The first successful search records pre-existing cards without notifying, while
 still checking projects known to have been published after monitoring was enabled.
 Rejected projects are retried after filter changes or after five minutes. Subsequent
-checks notify for new matching cards with the project name, URL, budget and skills,
-plus the client's name, country, star score and paid project count. Missing details
-are labeled "Not shown"; known zero scores and counts remain visible. Checks run about once
-a minute while Chrome runs with your Workana login; suspension can delay them.
-Messages include **Published at: 2026-11-18 12:03:42 UTC**, a calculated publication
-age, the search name and the qualifying client-filter rule. An exact API timestamp
-takes priority over a relative or date-only project-detail value. The UTC timestamp
-is shown only when the source supplies an epoch or a timestamp with a timezone.
-If Workana exposes only a relative age or calendar date, the message explicitly
-says the exact time is unavailable instead of inventing it. Unknown publication times are
-retried; they do not generate a notification claiming a new posting.
+checks notify for new matching projects. Missing fields are shown as an em dash,
+and known zero scores and counts remain visible. Checks run about once a minute
+while Chrome runs with your Workana login. The message shows the Workana publication time or date at the precision provided. If the publication data cannot establish that the job was posted after monitoring began, the extension waits for stronger evidence before sending an alert.
 Workana's human-readable publication dates in English, Spanish and Portuguese are
-recognized as calendar dates. A date overlapping the monitoring start day cannot
-prove a new posting by itself and waits for more precise evidence.
+recognized as calendar dates. The baseline prevents existing projects with unclear publication dates from generating alerts.
 Settings and seen IDs live only in extension storage; no backend or database is
 needed. Telegram credentials are separate from the JSON settings backup. Changing
 the bot or destination establishes a new baseline.
 
-Failed requests retry after a delay, including Telegram rate limits. Seen IDs
+Failed requests retry after a delay, including Telegram rate limits. When Workana requires verification during a search, the extension sends one Telegram alert per interruption. A successful search clears the interruption. Seen IDs
 survive worker restarts. A connection loss after Telegram accepts a message can
 cause a duplicate on retry. Only results returned by the search are checked, so
 projects that disappear between checks may be missed. Notifications do not bid.

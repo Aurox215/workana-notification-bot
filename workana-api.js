@@ -24,7 +24,7 @@
     if (typeof value !== 'string' || !/^\d+(?:[.,]\d+)?$/.test(value.trim())) return null;
     return Number(value.replace(',', '.'));
   }
-  const boolean = value => value === true || value === 'true' || value === 1 ? true : value === false || value === 'false' || value === 0 ? false : null;
+  const boolean = value => value === true || value === 'true' || value === '1' || value === 1 ? true : value === false || value === 'false' || value === '0' || value === 0 ? false : null;
   function publication(value) {
     if (typeof value === 'number' && Number.isFinite(value)) {
       const stamp = value < 1e12 ? value * 1000 : value;
@@ -66,6 +66,7 @@
     if (!identity || typeof title !== 'string' || !title.trim()) return null;
     const owner = first(row.client, row.author, row.employer) || {};
     const country = first(owner.country, owner.location?.country);
+    const projectCountry = first(row.country, row.location?.country);
     const rating = number(first(owner.stars, owner.rating?.average, owner.rating?.score, owner.rating, owner.score));
     const category = first(row.category?.slug, row.category_slug, row.category?.name, typeof row.category === 'string' ? row.category : null);
     const published = publication(first(row.published_at, row.publishedAt, row.datePosted, row.datePublished, row.published_date, row.publication_date, row.publishedDate, row.postedDate, row.published));
@@ -75,20 +76,29 @@
     return {
       ...identity, title: title.trim(), description: String(first(row.description, row.description_text) || '').slice(0, 24000), category: category || '',
       skills: Array.isArray(skills) ? skills.map(s => typeof s === 'string' ? s : first(s.name, s.title, s.slug)).filter(s => typeof s === 'string') : [], budget,
+      country: typeof projectCountry === 'string' ? projectCountry : first(projectCountry?.name, projectCountry?.label) || '',
+      countryCode: first(row.country_code, row.countryCode, projectCountry?.code) || '',
+      lastReply: first(row.last_reply_label, row.lastReplyLabel, row.last_reply_at, row.lastReplyAt, typeof row.lastReply === 'string' ? row.lastReply : null) || '',
+      bids: number(first(row.bids_count, row.bid_count, row.bidsCount, row.proposals_count, row.proposalsCount, row.bids)),
+      interested: number(first(row.interested_count, row.interestedCount, row.interested)),
       publishedAt: null, publishedPrecision: 'unknown', ...published,
       client: {
         name: first(owner.name, owner.display_name, owner.displayName, owner.initials) || '',
         country: typeof country === 'string' ? country : first(country?.name, country?.label) || '',
         countryCode: first(owner.country_code, owner.countryCode, country?.code) || '',
-        stars: rating, unrated: rating === 0 || owner.unrated === true,
-        verified: boolean(first(owner.verified_payment, owner.hasVerifiedPaymentMethod, owner.payment_verified, owner.verified)),
+        stars: rating, unrated: rating === 0 || owner.unrated === true ? true : rating !== null ? false : null,
+        verified: boolean(first(owner.verified_payment, owner.hasVerifiedPaymentMethod, owner.payment_verified, owner.paymentVerified)),
         published: number(first(owner.published_projects, owner.publishedProjects, owner.published)),
         paid: number(first(owner.paid_projects, owner.paidProjects, owner.paid)),
-        registeredAt: first(owner.registered_at, owner.registeredAt, owner.member_since, owner.joined_at) || null
+        registeredAt: first(owner.registered_at, owner.registeredAt, owner.member_since, owner.memberSince, owner.joined_at, owner.joinedAt) || null
       },
       closed: ['closed', 'cancelled', 'canceled', 'completed'].includes(String(row.status || '').toLowerCase()),
       publicationSource: 'Workana response'
     };
+  }
+  function mergeEvidence(fallback, preferred) {
+    const fields = Object.entries(preferred || {}).filter(([, value]) => value != null && value !== '' && (!Array.isArray(value) || value.length));
+    return { ...fallback, ...Object.fromEntries(fields) };
   }
   function parseResponse(text, options) {
     const { url, parseHTML, parseBudget } = options;
@@ -129,7 +139,17 @@
       const result = parseHTML(fragment, url);
       for (const project of result.projects || []) {
         const existing = projects.get(project.id);
-        projects.set(project.id, existing ? { ...project, ...existing, client: { ...project.client, ...existing.client } } : project);
+        if (!existing) {
+          projects.set(project.id, project);
+          continue;
+        }
+        const merged = mergeEvidence(project, existing);
+        merged.closed = project.closed || existing.closed;
+        merged.client = mergeEvidence(project.client, existing.client);
+        if (!Number.isFinite(existing.publishedAt) && Number.isFinite(project.publishedAt)) {
+          for (const field of ['publishedAt', 'publishedPrecision', 'publishedLatestAt', 'publishedLabel']) merged[field] = project[field];
+        }
+        projects.set(project.id, merged);
       }
       empty ||= result.empty === true;
       nextPage ||= result.nextPage || null;
@@ -140,6 +160,9 @@
     if (typeof next === 'string' && next) nextPage = next;
     if (nextPage) nextPage = new URL(nextPage, options.requestUrl || url).href;
     return { kind: 'list', projects: [...projects.values()], source: 'Workana search HTTP/API request', empty, nextPage };
+  }
+  function isVerificationTitle(title) {
+    return /^(?:just a moment\b|attention required\b|access denied\b|captcha(?:\s+verification)?(?:$|\s*[-|])|security (?:check|verification)\b|verify (?:you are|that you are)\b|(?:workana\s*[-|]\s*)?(?:sign in|log in|login)(?:$|\s*[-|]|\s+to\s+workana\b))/i.test(title.trim());
   }
   function recognizable(text, base) {
     try { const parsed = parseResponse(text, { url: base }); return parsed.projects.length > 0 || parsed.empty === true; }
@@ -154,5 +177,5 @@
       try { return containsCards(JSON.parse(text)); } catch { return containsCards(text); }
     }
   }
-  globalThis.WorkanaSearchAPI = { searchUrl, projectUrl, publication, parseResponse, recognizable };
+  globalThis.WorkanaSearchAPI = { searchUrl, projectUrl, publication, parseResponse, recognizable, isVerificationTitle };
 })();
