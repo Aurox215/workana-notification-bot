@@ -171,7 +171,7 @@
         });
       } },
       F('h3', {}, 'Telegram project notifications'),
-      F('p', {}, 'Checks every minute while Chrome is running and you are signed in to Workana. Uses your saved Project Filter. A client qualifies with a rating above 3, verified payment, or a join date in 2024 or later. Auto-Bid and an OpenAI key are not required.'),
+      F('p', {}, 'Checks every minute while Chrome is running and you are signed in to Workana. Uses your saved Project Filter. A client qualifies with a rating above 3, verified payment, or a join date before January 1, 2024. Auto-Bid and an OpenAI key are not required.'),
       B('Enable Telegram notifications', telegram.enabled, value => { telegram.enabled = value; }),
       L('Bot token from @BotFather', R(telegram.botToken, value => { telegram.botToken = value; }, { type: 'password', autoComplete: 'off' })),
       F('div', { class: 'field' },

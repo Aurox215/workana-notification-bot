@@ -105,19 +105,19 @@
     }
 
     const client = project.client || {};
-    const rating = Number.isFinite(client.stars) ? client.stars : client.unrated === true ? 0 : null;
+    const rating = Number.isFinite(client.stars) && client.stars >= 0 && client.stars <= 5 ? client.stars : client.unrated === true ? 0 : null;
     const joined = registrationDate(client.registeredAt);
     const criteria = [
       ['rating', rating === null ? null : rating > 3],
       ['payment verification', typeof client.verified === 'boolean' ? client.verified : null],
-      ['join date', joined ? joined.getUTCFullYear() > 2023 : null]
+      ['join date', joined && joined.getTime() <= Date.now() ? joined.getUTCFullYear() < 2024 : null]
     ];
-    const matched = criteria.filter(([, passed]) => passed === true).length;
-    if (matched >= 1) return { state: 'pass', stage: 'client', issues: [] };
+    const matched = criteria.filter(([, passed]) => passed === true).map(([name]) => name);
+    if (matched.length) return { state: 'pass', stage: 'client', issues: [], matched };
 
     const missing = criteria.filter(([, passed]) => passed === null).map(([field]) => field);
-    return matched + missing.length >= 1
-      ? { state: 'waiting', stage: 'client', issues: [`Client ${missing.join(', ')} unavailable.`] }
+    return missing.length
+      ? { state: 'waiting', stage: 'client', issues: [`No client criterion confirmed yet. Unavailable: ${missing.join(', ')}.`] }
       : { state: 'fail', stage: 'client', issues: ['Client meets none of the notification criteria.'] };
   }
   function projectMessage(project, { now } = {}) {
@@ -172,7 +172,7 @@
     return false;
   }
   function filterFingerprint(config) {
-    return JSON.stringify([1, config.search, config.project]);
+    return JSON.stringify([4, config.search, config.project]);
   }
   class Watcher {
     constructor({ storage, config, scan, inspect, eligible, fetcher }) {
@@ -262,6 +262,15 @@
           catch (error) { detailError = String(error.message || 'Details unavailable').replaceAll(settings.botToken || '\0', '[token]').slice(0, 250); }
         }
         const freshConfig = await this.config();
+        const client = { ...project.client };
+        for (const key of ['verified', 'registeredAt']) {
+          if (client[key] == null || client[key] === '') client[key] = candidate.client?.[key];
+        }
+        if (!Number.isFinite(client.stars) && client.unrated !== true) {
+          client.stars = candidate.client?.stars;
+          client.unrated = candidate.client?.unrated;
+        }
+        project = { ...project, client };
         const verdict = this.eligible(project, freshConfig);
         if (detailError && (verdict.state !== 'pass' || publishedSince(project, state.startedAt) !== true)) {
           const reason = `${detailError} Required evidence: ${(verdict.issues || []).join(' ') || 'publication time'}`;
@@ -288,7 +297,8 @@
         if (recency === true) {
           await send(settings, projectMessage(project), this.fetcher, projectKeyboard(project.url));
           sent++;
-          await this.remember(project, 'notified', `Telegram confirmed delivery. Published: ${publicationDisplay(project)}`, generation, { seen: { ...current.seen, [project.id]: true }, lastNotificationAt: Date.now() });
+          const match = verdict.matched?.length ? ` Client matched: ${verdict.matched.join(', ')}.` : '';
+          await this.remember(project, 'notified', `Telegram confirmed delivery.${match} Published: ${publicationDisplay(project)}`, generation, { seen: { ...current.seen, [project.id]: true }, lastNotificationAt: Date.now() });
           continue;
         }
         older++;

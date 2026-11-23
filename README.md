@@ -306,7 +306,7 @@ Use **Send test notification**, enable notifications, then save.
 
 A project must match your saved Project Filter. The client must meet at least
 one of these criteria: rating above 3 out of 5, verified payment, or a Workana
-join date in 2024 or later. Alerts include job and client details where Workana
+join date before January 1, 2024. Alerts include job and client details where Workana
 provides them, with **Open job** and **Copy link** buttons.
 
 The test button checks Telegram delivery only; it does not enable automatic

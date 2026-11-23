@@ -326,6 +326,36 @@ test('manual project check bypasses backoff and reports actual discovery without
   assert.ok(f.values.telegram.lastAttemptAt);
   assert.equal(f.values.telegram.baseline, true);
 });
+test('unavailable payment cannot block a qualifying rating or join date, even if optional details lose search evidence', async () => {
+  const f = fixture();
+  f.options.eligible = (project, config) => notificationEligibility(project, config, item => ({
+    state: item.closed ? 'fail' : 'pass', stage: 'project', issues: []
+  }));
+  f.options.inspect = async project => ({
+    ...project,
+    client: project.id === 'conflicting' ? { stars: 0, registeredAt: '2024-01-01', verified: null } : { verified: null },
+    closed: project.id === 'closed'
+  });
+  const watcher = new Watcher(f.options);
+  await watcher.tick();
+  const publication = { publishedAt: Date.now(), publishedPrecision: 'exact' };
+  f.projects([
+    { ...publication, id: 'rating', title: 'Rating alone', client: { stars: 4, registeredAt: '2024-01-01' } },
+    { ...publication, id: 'joined', title: 'Join date alone', client: { stars: 0, registeredAt: '2023-12-31' } },
+    { ...publication, id: 'conflicting', client: { stars: 4, registeredAt: '2024-01-01' } },
+    { ...publication, id: 'closed', client: { stars: 4 } },
+    { ...publication, id: 'unconfirmed', client: { stars: 3, registeredAt: '2024-01-01' } }
+  ]);
+  await watcher.tick();
+  assert.equal(f.requests.length, 2);
+  assert.match(f.requests[0].text, /Rating alone/);
+  assert.match(f.requests[1].text, /Join date alone/);
+  assert.match(f.values.telegram.recentChecks.find(p => p.id === 'rating').reason, /Client matched: rating/);
+  assert.match(f.values.telegram.recentChecks.find(p => p.id === 'joined').reason, /Client matched: join date/);
+  assert.equal(f.values.telegram.recentChecks.find(p => p.id === 'conflicting').result, 'waiting');
+  assert.equal(f.values.telegram.recentChecks.find(p => p.id === 'closed').result, 'filtered');
+  assert.match(f.values.telegram.recentChecks.find(p => p.id === 'unconfirmed').reason, /No client criterion confirmed yet. Unavailable: payment verification/);
+});
 test('watcher requires the real project filter and any one client criterion', async () => {
   const context = vm.createContext({ structuredClone, AbortSignal, URL });
   vm.runInContext(fs.readFileSync('integrations.js', 'utf8'), context);
@@ -338,7 +368,7 @@ test('watcher requires the real project filter and any one client criterion', as
   f.options.eligible = (project, current) => notificationEligibility(project, current, context.filters.project);
   const watcher = new Watcher(f.options);
   await watcher.tick();
-  const client = { stars: 3, verified: false, registeredAt: '2023-12-31' };
+  const client = { stars: 3, verified: false, registeredAt: '2024-01-01' };
   const project = { category: 'it-programming', skills: ['React'] };
   f.projects([
     { ...project, id: 'excluded', skills: ['WordPress'], client: { stars: 5 } },
@@ -348,7 +378,9 @@ test('watcher requires the real project filter and any one client criterion', as
     { ...project, id: 'unknown', client: {} },
     { ...project, id: 'rating', client: { ...client, stars: 3.1 } },
     { ...project, id: 'verified', client: { verified: true } },
-    { ...project, id: 'joined', client: { ...client, registeredAt: '2024-01-01' } },
+    { ...project, id: 'joined', client: { ...client, registeredAt: '2023-12-31' } },
+    { ...project, id: 'out-of-range-rating', client: { ...client, stars: 6 } },
+    { ...project, id: 'future-date', client: { ...client, registeredAt: '2099-01-01' } },
     { ...project, id: 'invalid-date', client: { ...client, registeredAt: '2024-02-30' } }
   ]);
   await watcher.tick();
